@@ -6,3 +6,4 @@ Release/*
 .cproject
 .project
 build
+tmp/
