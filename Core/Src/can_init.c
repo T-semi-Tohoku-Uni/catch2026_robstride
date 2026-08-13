@@ -1,7 +1,7 @@
 #include "can_init.h"
 #include <stdio.h>
 
-extern FDCAN_HandleTypeDef hfdcan1;
+extern FDCAN_HandleTypeDef hfdcan3;
 
 void motor_CAN_filter_init(FDCAN_FilterTypeDef *Hfdcan_Filter_Settings)
 {
@@ -32,25 +32,25 @@ HAL_StatusTypeDef motor_CAN_RxTxSettings_init(FDCAN_TxHeaderTypeDef *Htxheader)
   motor_CAN_filter_init(&FDCAN_Filter_settings_robstride);
   motor_CAN_txheader_init(Htxheader);
 
-  if (HAL_OK != HAL_FDCAN_ConfigFilter(&hfdcan1, &FDCAN_Filter_settings_robstride))
+  if (HAL_OK != HAL_FDCAN_ConfigFilter(&hfdcan3, &FDCAN_Filter_settings_robstride))
 	{
 		printf("config filter is error\r\n");
 		return HAL_ERROR;
 	}
 
-  if (HAL_OK != HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_ACCEPT_IN_RX_FIFO0, FDCAN_ACCEPT_IN_RX_FIFO0, FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE))
+  if (HAL_OK != HAL_FDCAN_ConfigGlobalFilter(&hfdcan3, FDCAN_ACCEPT_IN_RX_FIFO0, FDCAN_ACCEPT_IN_RX_FIFO0, FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE))
   {
 		printf("config global filter is error\r\n");
     return HAL_ERROR;
 	}
 	
-  if (HAL_OK != HAL_FDCAN_Start(&hfdcan1))
+  if (HAL_OK != HAL_FDCAN_Start(&hfdcan3))
 	{
 		printf("fdcan start is error\r\n");
 		return HAL_ERROR;
 	}
 
-  if (HAL_OK != HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0))
+  if (HAL_OK != HAL_FDCAN_ActivateNotification(&hfdcan3, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0))
 	{
 		printf("fdcan active notification is error\r\n");
 		return HAL_ERROR;

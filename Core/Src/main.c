@@ -21,7 +21,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
 
+#include "can_init.h"
+#include "robstride_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -36,7 +39,10 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
+#define HOST_ID 0xfe
 
+#define RIGHT_RS03 0
+#define LEFT_RS03 1
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -48,7 +54,8 @@ TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+FDCAN_TxHeaderTypeDef motor_txheader;
+RobstrideMotor RS03[2] = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,7 +71,22 @@ static void MX_FDCAN3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void robstride_init()
+{
+  RS03[LEFT_RS03].host_id  = HOST_ID;
+  RS03[RIGHT_RS03].host_id = HOST_ID;
+  RS03[LEFT_RS03].motor_id  = LEFT_RS03;
+  RS03[RIGHT_RS03].motor_id = RIGHT_RS03;
 
+  RS03[LEFT_RS03].run_mode  = POSITION_PP;
+  RS03[RIGHT_RS03].run_mode = POSITION_PP;
+
+  RS03[LEFT_RS03].txheader  = motor_txheader;
+  RS03[RIGHT_RS03].txheader = motor_txheader;
+
+  robstride_start_position_pp_mode(&RS03[LEFT_RS03], 1, 10, 10);
+  robstride_start_position_pp_mode(&RS03[RIGHT_RS03], 1, 10, 10);
+}
 /* USER CODE END 0 */
 
 /**
@@ -101,7 +123,8 @@ int main(void)
   MX_TIM6_Init();
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
-
+  motor_CAN_RxTxSettings_init(&motor_txheader);
+  robstride_init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -367,6 +390,11 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+int _write(int file,char *ptr,int len)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, 10);
+  return len;
+}
 /* USER CODE END 4 */
 
 /**

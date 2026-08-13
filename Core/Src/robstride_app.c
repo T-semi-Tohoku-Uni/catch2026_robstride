@@ -2,7 +2,7 @@
 
 #include "main.h"
 
-extern FDCAN_HandleTypeDef hfdcan1;
+extern FDCAN_HandleTypeDef hfdcan3;
 
 /* id 関連 */
 
@@ -125,7 +125,7 @@ float robstride_u16_to_float(
 bool send_robstride(RobstrideMotor *motor, uint32_t id, uint8_t *txdata)
 {
 	motor->txheader.Identifier = id;
-	if (HAL_OK!= HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &motor->txheader, txdata))
+	if (HAL_OK!= HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan3, &motor->txheader, txdata))
 	{
 		return false;
 	}
