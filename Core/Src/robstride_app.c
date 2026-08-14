@@ -122,6 +122,11 @@ float robstride_u16_to_float(
 
 /* robstride app */
 
+void robstride_delay(void)
+{
+	HAL_Delay(10);
+}
+
 bool send_robstride(RobstrideMotor *motor, uint32_t id, uint8_t *txdata)
 {
 	motor->txheader.Identifier = id;
@@ -405,6 +410,7 @@ bool robstride_start_current_mode(
 	{
 		return false;
 	}
+	robstride_delay();
 
 	if (!robstride_set_run_mode(
 			motor,
@@ -413,6 +419,7 @@ bool robstride_start_current_mode(
 	{
 		return false;
 	}
+	robstride_delay();
 
 	return robstride_enable(motor);
 }
@@ -426,6 +433,7 @@ bool robstride_start_velocity_mode(
 	{
 		return false;
 	}
+	robstride_delay();
 	if (!robstride_set_run_mode(
 		motor,
 		VELOCITY
@@ -433,11 +441,13 @@ bool robstride_start_velocity_mode(
 	{
 		return false;
 	}
+	robstride_delay();
 
 	if (!robstride_enable(motor))
 	{
 		return false;
 	}
+	robstride_delay();
 
 	return robstride_set_current_limit(
 		motor,
@@ -456,7 +466,7 @@ bool robstride_start_position_pp_mode(
     {
         return false;
     }
-	
+	robstride_delay();
 
     if (!robstride_set_run_mode(
 		motor,
@@ -465,13 +475,13 @@ bool robstride_start_position_pp_mode(
     {
         return false;
     }
-	
+	robstride_delay();
 
     if (!robstride_enable(motor))
     {
         return false;
     }
-	
+	robstride_delay();
 
     if (!robstride_set_pp_velocity_max(
 		motor,
@@ -480,7 +490,7 @@ bool robstride_start_position_pp_mode(
     {
         return false;
     }
-	
+	robstride_delay();
 
     if (!robstride_set_pp_acceleration(
 		motor,
@@ -489,7 +499,7 @@ bool robstride_start_position_pp_mode(
     {
         return false;
     }
-	
+	robstride_delay();
 
     return robstride_set_current_limit(
         motor,
@@ -507,6 +517,7 @@ bool robstride_start_position_csp_mode(
 	{
 		return false;
 	}
+	robstride_delay();
 
 	if (!robstride_set_run_mode(
 		motor,
@@ -515,11 +526,13 @@ bool robstride_start_position_csp_mode(
 	{
 		return false;
 	}
+	robstride_delay();
 
 	if (!robstride_enable(motor))
 	{
 		return false;
 	}
+	robstride_delay();
 
 	if (!robstride_set_speed_limit(
 		motor,
@@ -528,6 +541,7 @@ bool robstride_start_position_csp_mode(
 	{
 		return false;
 	}
+	robstride_delay();
 
 	return robstride_set_current_limit(
 		motor,

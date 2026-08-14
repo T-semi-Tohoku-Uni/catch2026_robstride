@@ -95,6 +95,7 @@ float robstride_u16_to_float(
 );
 
 /* robstride app */
+void robstride_delay(void);
 bool send_robstride(RobstrideMotor *motor, uint32_t id, uint8_t *txdata);
 bool robstride_enable(RobstrideMotor *motor);
 bool robstride_stop(RobstrideMotor *motor);
