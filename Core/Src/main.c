@@ -87,6 +87,45 @@ void robstride_init()
   robstride_start_position_pp_mode(&RS03[LEFT_RS03], 1, 10, 10);
   robstride_start_position_pp_mode(&RS03[RIGHT_RS03], 1, 10, 10);
 }
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
+{
+  if (hfdcan->Instance != FDCAN3 ||
+      (RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
+  {
+    return;
+  }
+
+  while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO0) > 0U)
+  {
+    FDCAN_RxHeaderTypeDef rxheader;
+    uint8_t rxdata[8];
+
+    if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxheader, rxdata) != HAL_OK)
+    {
+      break;
+    }
+
+    if (rxheader.IdType != FDCAN_EXTENDED_ID ||
+        rxheader.RxFrameType != FDCAN_DATA_FRAME ||
+        rxheader.DataLength != FDCAN_DLC_BYTES_8 ||
+        robstride_get_communication_type(rxheader.Identifier) != FeedbackId ||
+        robstride_get_destination_id(rxheader.Identifier) != HOST_ID)
+    {
+      continue;
+    }
+
+    const uint8_t motor_id = (uint8_t)(robstride_get_area_2(rxheader.Identifier) & 0xffU);
+    for (uint32_t i = 0; i < (sizeof(RS03) / sizeof(RS03[0])); i++)
+    {
+      if (RS03[i].motor_id == motor_id)
+      {
+        robstride_parse_feedback(rxheader.Identifier, rxdata, &RS03[i].feedback);
+        break;
+      }
+    }
+  }
+}
 /* USER CODE END 0 */
 
 /**
