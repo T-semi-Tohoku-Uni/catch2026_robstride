@@ -75,8 +75,8 @@ void robstride_init()
 {
   RS03[LEFT_RS03].host_id  = HOST_ID;
   RS03[RIGHT_RS03].host_id = HOST_ID;
-  RS03[LEFT_RS03].motor_id  = LEFT_RS03;
-  RS03[RIGHT_RS03].motor_id = RIGHT_RS03;
+  RS03[LEFT_RS03].motor_id  = 2;
+  RS03[RIGHT_RS03].motor_id = 3;
 
   RS03[LEFT_RS03].run_mode  = POSITION_PP;
   RS03[RIGHT_RS03].run_mode = POSITION_PP;
@@ -170,6 +170,10 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    robstride_set_position(&RS03[1], 0);
+    HAL_Delay(5000);
+    robstride_set_position(&RS03[1], 1.54);
+    HAL_Delay(5000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
