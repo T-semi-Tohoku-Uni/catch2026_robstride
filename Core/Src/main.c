@@ -61,6 +61,7 @@ TIM_HandleTypeDef htim6;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+FDCAN_TxHeaderTypeDef inter_board_txheader;
 FDCAN_TxHeaderTypeDef motor_txheader;
 RobstrideMotor robstride_handler[2] = {0};
 /* USER CODE END PV */
@@ -133,6 +134,26 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     }
   }
 }
+
+void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
+{
+  if (hfdcan->Instance != FDCAN1 ||
+      (RxFifo1ITs & FDCAN_IT_RX_FIFO1_NEW_MESSAGE) == 0U)
+  {
+    return;
+  }
+
+  while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO1) > 0U)
+  {
+    FDCAN_RxHeaderTypeDef rxheader;
+    uint8_t rxdata[64];
+
+    if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO1, &rxheader, rxdata) != HAL_OK)
+    {
+      break;
+    }
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -169,6 +190,7 @@ int main(void)
   MX_TIM6_Init();
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
+  inter_board_CAN_RxTxSettings_init(&inter_board_txheader);
   motor_CAN_RxTxSettings_init(&motor_txheader);
   robstride_init();
   /* USER CODE END 2 */
