@@ -41,8 +41,15 @@
 /* USER CODE BEGIN PM */
 #define HOST_ID 0xfe
 
-#define RIGHT_RS03 0
-#define LEFT_RS03 1
+#define RIGHT_RS03_ID 3
+#define LEFT_RS03_ID 4
+
+#define EL05_ID 5
+
+#define RIGHT_RS03_INDEX 0
+#define LEFT_RS03_INDEX 1
+
+#define EL05_INDEX 2
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -55,7 +62,7 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 FDCAN_TxHeaderTypeDef motor_txheader;
-RobstrideMotor RS03[2] = {0};
+RobstrideMotor robstride_handler[2] = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -73,19 +80,19 @@ static void MX_FDCAN3_Init(void);
 /* USER CODE BEGIN 0 */
 void robstride_init()
 {
-  RS03[LEFT_RS03].host_id  = HOST_ID;
-  RS03[RIGHT_RS03].host_id = HOST_ID;
-  RS03[LEFT_RS03].motor_id  = 2;
-  RS03[RIGHT_RS03].motor_id = 3;
+  robstride_handler[LEFT_RS03_INDEX].host_id  = HOST_ID;
+  robstride_handler[RIGHT_RS03_INDEX].host_id = HOST_ID;
+  robstride_handler[LEFT_RS03_INDEX].motor_id  = LEFT_RS03_ID;
+  robstride_handler[RIGHT_RS03_INDEX].motor_id = RIGHT_RS03_ID;
 
-  RS03[LEFT_RS03].run_mode  = POSITION_PP;
-  RS03[RIGHT_RS03].run_mode = POSITION_PP;
+  robstride_handler[LEFT_RS03_INDEX].run_mode  = POSITION_PP;
+  robstride_handler[RIGHT_RS03_INDEX].run_mode = POSITION_PP;
 
-  RS03[LEFT_RS03].txheader  = motor_txheader;
-  RS03[RIGHT_RS03].txheader = motor_txheader;
+  robstride_handler[LEFT_RS03_INDEX].txheader  = motor_txheader;
+  robstride_handler[RIGHT_RS03_INDEX].txheader = motor_txheader;
 
-  robstride_start_position_pp_mode(&RS03[LEFT_RS03], 1, 10, 10);
-  robstride_start_position_pp_mode(&RS03[RIGHT_RS03], 1, 10, 10);
+  robstride_start_position_pp_mode(&robstride_handler[LEFT_RS03_INDEX], 1, 10, 10);
+  robstride_start_position_pp_mode(&robstride_handler[RIGHT_RS03_INDEX], 1, 10, 10);
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
@@ -116,11 +123,11 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     }
 
     const uint8_t motor_id = (uint8_t)(robstride_get_area_2(rxheader.Identifier) & 0xffU);
-    for (uint32_t i = 0; i < (sizeof(RS03) / sizeof(RS03[0])); i++)
+    for (uint32_t i = 0; i < (sizeof(robstride_handler) / sizeof(robstride_handler[0])); i++)
     {
-      if (RS03[i].motor_id == motor_id)
+      if (robstride_handler[i].motor_id == motor_id)
       {
-        robstride_parse_feedback(rxheader.Identifier, rxdata, &RS03[i].feedback);
+        robstride_parse_feedback(rxheader.Identifier, rxdata, &robstride_handler[i].feedback);
         break;
       }
     }
@@ -170,9 +177,9 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    robstride_set_position(&RS03[1], 0);
+    robstride_set_position(&robstride_handler[1], 0);
     HAL_Delay(5000);
-    robstride_set_position(&RS03[1], 1.54);
+    robstride_set_position(&robstride_handler[1], 1.54);
     HAL_Delay(5000);
     /* USER CODE END WHILE */
 
