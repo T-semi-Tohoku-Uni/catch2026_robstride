@@ -92,8 +92,10 @@ void robstride_init()
   robstride_handler[LEFT_RS03_INDEX].txheader  = motor_txheader;
   robstride_handler[RIGHT_RS03_INDEX].txheader = motor_txheader;
 
-  robstride_start_position_pp_mode(&robstride_handler[LEFT_RS03_INDEX], 1, 10, 10);
-  robstride_start_position_pp_mode(&robstride_handler[RIGHT_RS03_INDEX], 1, 10, 10);
+  for (int i = 0; i < 3; ++i)
+  {
+    robstride_start_position_pp_mode(&robstride_handler[i], 10, 1, 10);
+  }
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
@@ -199,10 +201,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    robstride_set_position(&robstride_handler[1], 0);
-    HAL_Delay(5000);
-    robstride_set_position(&robstride_handler[1], 1.54);
-    HAL_Delay(5000);
+    
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
