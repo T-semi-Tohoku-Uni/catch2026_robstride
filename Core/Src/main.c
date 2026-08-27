@@ -25,6 +25,7 @@
 
 #include "can_init.h"
 #include "robstride_app.h"
+#include "cybergear.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,6 +47,8 @@
 
 #define EL05_ID 5
 
+#define CYBER_GEAR_ID 0x8F
+
 #define RIGHT_RS03_INDEX 0
 #define LEFT_RS03_INDEX 1
 
@@ -63,7 +66,8 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 FDCAN_TxHeaderTypeDef inter_board_txheader;
 FDCAN_TxHeaderTypeDef motor_txheader;
-RobstrideMotor robstride_handler[2] = {0};
+RobstrideMotor robstride_handler[3] = {0};
+CyberGearMotor cybergear_base;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -79,23 +83,62 @@ static void MX_FDCAN3_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-void robstride_init()
+bool robstride_init(void)
 {
   robstride_handler[LEFT_RS03_INDEX].host_id  = HOST_ID;
   robstride_handler[RIGHT_RS03_INDEX].host_id = HOST_ID;
+  robstride_handler[EL05_INDEX].host_id       = HOST_ID;
   robstride_handler[LEFT_RS03_INDEX].motor_id  = LEFT_RS03_ID;
   robstride_handler[RIGHT_RS03_INDEX].motor_id = RIGHT_RS03_ID;
+  robstride_handler[EL05_INDEX].motor_id       = EL05_ID;
 
   robstride_handler[LEFT_RS03_INDEX].run_mode  = POSITION_PP;
   robstride_handler[RIGHT_RS03_INDEX].run_mode = POSITION_PP;
+  robstride_handler[EL05_INDEX].run_mode       = POSITION_PP;
 
   robstride_handler[LEFT_RS03_INDEX].txheader  = motor_txheader;
   robstride_handler[RIGHT_RS03_INDEX].txheader = motor_txheader;
+  robstride_handler[EL05_INDEX].txheader       = motor_txheader;
 
-  for (int i = 0; i < 3; ++i)
+  for (uint32_t i = 0; i < (sizeof(robstride_handler) / sizeof(robstride_handler[0])); ++i)
   {
-    robstride_start_position_pp_mode(&robstride_handler[i], 10, 1, 10);
+    if (!robstride_start_position_pp_mode(&robstride_handler[i], 10, 1, 10))
+    {
+      return false;
+    }
   }
+
+  return true;
+}
+
+bool cybergear_base_init(void)
+{
+  if (!cybergear_init(
+    &cybergear_base,
+    &hfdcan3,
+    CYBER_GEAR_ID,
+    HOST_ID
+  ))
+  {
+    return false;
+  }
+
+  if (!cybergear_stop(&cybergear_base))
+  {
+    return false;
+  }
+  HAL_Delay(10);
+
+  if (!cybergear_set_run_mode(
+    &cybergear_base,
+    CYBERGEAR_RUN_MODE_POSITION
+  ))
+  {
+    return false;
+  }
+  HAL_Delay(10);
+
+  return cybergear_enable(&cybergear_base);
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
@@ -121,6 +164,15 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
         rxheader.DataLength != FDCAN_DLC_BYTES_8 ||
         robstride_get_communication_type(rxheader.Identifier) != FeedbackId ||
         robstride_get_destination_id(rxheader.Identifier) != HOST_ID)
+    {
+      continue;
+    }
+
+    if (cybergear_parse_feedback(
+      &cybergear_base,
+      rxheader.Identifier,
+      rxdata
+    ))
     {
       continue;
     }
@@ -194,7 +246,14 @@ int main(void)
   /* USER CODE BEGIN 2 */
   inter_board_CAN_RxTxSettings_init(&inter_board_txheader);
   motor_CAN_RxTxSettings_init(&motor_txheader);
-  robstride_init();
+  if (!robstride_init())
+  {
+    Error_Handler();
+  }
+  if (!cybergear_base_init())
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
