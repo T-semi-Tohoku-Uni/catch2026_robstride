@@ -78,7 +78,10 @@ static void MX_FDCAN1_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_FDCAN3_Init(void);
 /* USER CODE BEGIN PFP */
-
+void u8_to_int(uint8_t *req, int32_t *des, uint32_t uint8_len);
+void u8_to_float(uint8_t *req, float *des, uint32_t uint8_len);
+void float_to_u8(float *req, uint8_t *des, uint32_t float_len);
+void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -545,6 +548,57 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void u8_to_float(uint8_t *req, float *des, uint32_t uint8_len)
+{
+  union IntAndFloat {
+    uint32_t ival;
+    float fval;
+  };
+  for(int i = 0; i < uint8_len/4; i++){
+    uint32_t f32_u32 = ((req[i*4] << 24) | (req[i*4+1] << 16) | (req[i*4+2] << 8) | (req[i*4+3]));
+    union IntAndFloat target;
+    target.ival = f32_u32;
+    des[i] = target.fval;
+  }
+}
+
+void u8_to_int(uint8_t *req, int32_t *des, uint32_t uint8_len)
+{
+  for(int i = 0; i < uint8_len/4; i++){
+    uint32_t u32 = ((req[i*4] << 24) | (req[i*4+1] << 16) | (req[i*4+2] << 8) | (req[i*4+3]));
+    des[i] = (int32_t)u32;
+  }
+}
+
+void float_to_u8(float *req, uint8_t *des, uint32_t float_len)
+{
+  union IntAndFloat {
+    uint32_t ival;
+    float fval;
+  };
+  for (int i = 0; i < float_len; i++)
+  {
+    union IntAndFloat target;
+    target.fval = req[i];
+    uint32_t val = target.ival;
+    des[i*4    ] = (uint8_t)((val >> 24) & 0xff);
+    des[i*4 + 1] = (uint8_t)((val >> 16) & 0xff);
+    des[i*4 + 2] = (uint8_t)((val >>  8) & 0xff);
+    des[i*4 + 3] = (uint8_t)((val      ) & 0xff);
+  }
+}
+
+void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len)
+{
+  for (int i = 0; i < int_len; i++)
+  {
+    uint32_t val = (uint32_t)req[i];
+    des[i*4    ] = (uint8_t)((val >> 24) & 0xff);
+    des[i*4 + 1] = (uint8_t)((val >> 16) & 0xff);
+    des[i*4 + 2] = (uint8_t)((val >>  8) & 0xff);
+    des[i*4 + 3] = (uint8_t)((val      ) & 0xff);
+  }
+}
 
 int _write(int file,char *ptr,int len)
 {
