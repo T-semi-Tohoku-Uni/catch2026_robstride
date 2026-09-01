@@ -548,3 +548,21 @@ bool robstride_start_position_csp_mode(
 		current_limit_a
 	);
 }
+
+bool robstride_set_zero(RobstrideMotor *motor)
+{
+    uint8_t data[8] = {0};
+    
+    // Set Zero の通信タイプ（仮に0x03とする。仕様書に合わせてください）
+    const uint8_t set_zero_comm_type = 0x03; 
+
+    const uint32_t id = robstride_make_can_id(
+        set_zero_comm_type, motor->host_id, motor->motor_id
+    );
+
+    if (!send_robstride(motor, id, data))
+    {
+        return false;
+    }
+    return true;
+}

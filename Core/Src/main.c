@@ -47,12 +47,15 @@
 
 #define EL05_ID 5
 
-#define CYBER_GEAR_ID 0x8F
+#define CYBER_GEAR_ID 0x7f
+
 
 #define RIGHT_RS03_INDEX 0
 #define LEFT_RS03_INDEX 1
 
 #define EL05_INDEX 2
+
+#define CANID 0x200
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -68,6 +71,8 @@ FDCAN_TxHeaderTypeDef inter_board_txheader;
 FDCAN_TxHeaderTypeDef motor_txheader;
 RobstrideMotor robstride_handler[3] = {0};
 CyberGearMotor cybergear_base;
+
+volatile float target_angle[4] = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -86,6 +91,44 @@ void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+bool cybergear_homing(void)
+{
+  // 1. 速度制御モードに変更して有効化
+  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_SPEED)) 
+  {
+    return false;
+  }
+  HAL_Delay(10);
+  if (!cybergear_enable(&cybergear_base)) 
+  {
+    return false;
+  }
+
+  GPIO_PinState initial_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+
+  cybergear_set_velocity(&cybergear_base, 1.0f);
+
+  while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == initial_state)
+  {
+    HAL_Delay(10); 
+  }
+
+  cybergear_stop(&cybergear_base);
+  HAL_Delay(100); 
+
+
+  cybergear_set_zero(&cybergear_base);
+  HAL_Delay(10);
+
+
+  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_POSITION)) 
+  {
+    return false;
+  }
+  HAL_Delay(10);
+  return cybergear_enable(&cybergear_base);
+}
+
 bool robstride_init(void)
 {
   robstride_handler[LEFT_RS03_INDEX].host_id  = HOST_ID;
@@ -105,6 +148,13 @@ bool robstride_init(void)
 
   for (uint32_t i = 0; i < (sizeof(robstride_handler) / sizeof(robstride_handler[0])); ++i)
   {
+    // robstride_stop(&robstride_handler[i]);
+    // HAL_Delay(10);
+
+    // // 2. 現在位置をゼロ点に設定する
+    // robstride_set_zero(&robstride_handler[i]);
+    // HAL_Delay(10);
+
     if (!robstride_start_position_pp_mode(&robstride_handler[i], 10, 1, 10))
     {
       return false;
@@ -132,6 +182,10 @@ bool cybergear_base_init(void)
   }
   HAL_Delay(10);
 
+  // if (!cybergear_set_zero(&cybergear_base))
+  //   return false;
+  // HAL_Delay(10);
+
   if (!cybergear_set_run_mode(
     &cybergear_base,
     CYBERGEAR_RUN_MODE_POSITION
@@ -156,6 +210,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
   {
     FDCAN_RxHeaderTypeDef rxheader;
     uint8_t rxdata[8];
+    //printf("0x%03lX\r\n",rxheader.Identifier);
 
     if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxheader, rxdata) != HAL_OK)
     {
@@ -208,6 +263,21 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
     if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO1, &rxheader, rxdata) != HAL_OK)
     {
       break;
+    }
+
+    switch (rxheader.Identifier)
+    {
+      case CANID: 
+        float received_floats[4];
+        u8_to_float(rxdata, received_floats, 16);
+        for (int i = 0;i<4;i++){
+          target_angle[i] = received_floats[i];
+        }
+
+        break;
+      default:
+        // printf("unknown CAN ID received: 0x%03lX\r\n", RxHeader.Identifier); // printf should be commented out within Callback
+        break;
     }
   }
 }
@@ -269,16 +339,38 @@ int main(void)
   {
     Error_Handler();
   }
+
+  if (!cybergear_homing())
+  {
+    printf("CyberGear Homing Failed\r\n");
+    Error_Handler();
+  }
+  printf("a\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  float target_angle1 = 0.785;
   while (1)
   {
     
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], (target_angle[2]- 1.884));
+    HAL_Delay(1);
+    robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], (-target_angle[1]-1.0f));
+    HAL_Delay(1);
+    robstride_set_position(&robstride_handler[EL05_INDEX], 0.0f);
+    HAL_Delay(1);
+    target_angle1 = -target_angle1; 
+    cybergear_set_position(&cybergear_base, target_angle1);
+    // printf("Right: %f, Left: %f, EL: %f\r\n",
+    //        (target_angle[2]- 2.878),
+    //        (-target_angle[1]-1.0f),
+    //        0.0f);
+    
+    HAL_Delay(5000);
   }
   /* USER CODE END 3 */
 }
@@ -435,7 +527,7 @@ static void MX_TIM6_Init(void)
   htim6.Instance = TIM6;
   htim6.Init.Prescaler = 79;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 999;
+  htim6.Init.Period = 9999;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
@@ -527,6 +619,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : limit_Pin */
+  GPIO_InitStruct.Pin = limit_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(limit_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : Board_LED_Pin */
   GPIO_InitStruct.Pin = Board_LED_Pin;

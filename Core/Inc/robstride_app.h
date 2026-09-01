@@ -189,4 +189,6 @@ bool robstride_start_position_csp_mode(
 	float current_limit_a
 );
 
+bool robstride_set_zero(RobstrideMotor *motor);
+
 #endif
