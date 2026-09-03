@@ -72,7 +72,7 @@ FDCAN_TxHeaderTypeDef motor_txheader;
 RobstrideMotor robstride_handler[3] = {0};
 CyberGearMotor cybergear_base;
 
-volatile float target_angle[4] = {0};
+volatile float target_angle[4] = {0,0,2.0,0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -121,10 +121,11 @@ bool cybergear_homing(void)
   HAL_Delay(10);
 
 
-  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_POSITION)) 
+  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_OPERATION)) 
   {
     return false;
   }
+
   HAL_Delay(10);
   return cybergear_enable(&cybergear_base);
 }
@@ -182,13 +183,14 @@ bool cybergear_base_init(void)
   }
   HAL_Delay(10);
 
+
   // if (!cybergear_set_zero(&cybergear_base))
   //   return false;
   // HAL_Delay(10);
 
   if (!cybergear_set_run_mode(
     &cybergear_base,
-    CYBERGEAR_RUN_MODE_POSITION
+    CYBERGEAR_RUN_MODE_OPERATION
   ))
   {
     return false;
@@ -293,6 +295,29 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
   }
 }
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+  if (htim == &htim6) {
+    float send_angles[4] = {0};
+    uint8_t txdata[16] = {0};
+
+    // 1. 各モーターのフィードバックから現在角度(position_rad)を取得
+    send_angles[2] = robstride_handler[RIGHT_RS03_INDEX].feedback.position_rad + 1.884;
+    send_angles[1] = -(robstride_handler[LEFT_RS03_INDEX].feedback.position_rad + 1.0);
+    send_angles[3] = robstride_handler[EL05_INDEX].feedback.position_rad;
+    send_angles[0] = cybergear_base.feedback.position_rad;
+
+    // 2. float (4つ) を uint8_t配列 (16バイト) に変換
+    float_to_u8(send_angles, txdata, 4);
+
+    // 3. 送信設定の変更 (16バイトのCAN FDフレームとして送信)
+    inter_board_txheader.Identifier = 0x210; // 必要に応じてIDを変更してください
+    inter_board_txheader.DataLength = FDCAN_DLC_BYTES_16; 
+
+    // 4. FDCAN1から送信
+    HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &inter_board_txheader, txdata);
+  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -303,6 +328,7 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  setbuf(stdout, NULL);
 
   /* USER CODE END 1 */
 
@@ -346,6 +372,7 @@ int main(void)
     Error_Handler();
   }
   printf("a\r\n");
+  HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -364,13 +391,19 @@ int main(void)
     robstride_set_position(&robstride_handler[EL05_INDEX], 0.0f);
     HAL_Delay(1);
     target_angle1 = -target_angle1; 
-    cybergear_set_position(&cybergear_base, target_angle1);
+    float target_pos = target_angle[0];
+    float target_vel = 0.0f; // 目標速度は0 (位置決め)
+    float kp = 8.0f;        // 位置ゲイン (バネの硬さ) 範囲: 0.0 ~ 500.0
+    float kd = 4.0f;         // 速度ゲイン (ダンピング/粘性) 範囲: 0.0 ~ 5.0
+    float ff_torque = 0.0f;  // フィードフォワードトルクは0
+
+    cybergear_control(&cybergear_base, target_pos, target_vel, kp, kd, ff_torque);
     // printf("Right: %f, Left: %f, EL: %f\r\n",
     //        (target_angle[2]- 2.878),
     //        (-target_angle[1]-1.0f),
     //        0.0f);
     
-    HAL_Delay(5000);
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
