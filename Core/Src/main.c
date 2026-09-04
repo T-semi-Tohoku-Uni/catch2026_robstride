@@ -304,7 +304,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     // 1. 各モーターのフィードバックから現在角度(position_rad)を取得
     send_angles[2] = robstride_handler[RIGHT_RS03_INDEX].feedback.position_rad + 1.884;
     send_angles[1] = -(robstride_handler[LEFT_RS03_INDEX].feedback.position_rad + 1.0);
-    send_angles[3] = robstride_handler[EL05_INDEX].feedback.position_rad;
+    send_angles[3] = robstride_handler[EL05_INDEX].feedback.position_rad - 2.23;
     send_angles[0] = cybergear_base.feedback.position_rad;
 
     // 2. float (4つ) を uint8_t配列 (16バイト) に変換
@@ -388,7 +388,7 @@ int main(void)
     HAL_Delay(1);
     robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], (-target_angle[1]-1.0f));
     HAL_Delay(1);
-    robstride_set_position(&robstride_handler[EL05_INDEX], 0.0f);
+    robstride_set_position(&robstride_handler[EL05_INDEX], (target_angle[3] + 2.23));
     HAL_Delay(1);
     target_angle1 = -target_angle1; 
     float target_pos = target_angle[0];
