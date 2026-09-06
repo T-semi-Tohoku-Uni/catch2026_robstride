@@ -193,7 +193,7 @@ bool robstride_clear_fault(RobstrideMotor *motor)
 void robstride_parse_feedback(
 	uint32_t canid,
 	const uint8_t *rxdata,
-	RobstrideFeedback *feedback
+	volatile RobstrideFeedback *feedback
 )
 {
 	if (0x02 != robstride_get_communication_type(canid)) return;
@@ -215,6 +215,7 @@ void robstride_parse_feedback(
 	feedback->temperature_c = (float)temp_raw / 10.0;
 	feedback->last_leceived_ms = HAL_GetTick();
 	feedback->online = true;
+	++feedback->received_count;
 }
 
 /* parameter raw func */

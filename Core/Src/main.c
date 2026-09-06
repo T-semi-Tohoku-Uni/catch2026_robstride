@@ -357,10 +357,6 @@ int main(void)
   /* USER CODE BEGIN 2 */
   inter_board_CAN_RxTxSettings_init(&inter_board_txheader);
   motor_CAN_RxTxSettings_init(&motor_txheader);
-  if (!robstride_init())
-  {
-    Error_Handler();
-  }
   if (!cybergear_base_init())
   {
     Error_Handler();
@@ -371,19 +367,50 @@ int main(void)
     printf("CyberGear Homing Failed\r\n");
     Error_Handler();
   }
-  printf("a\r\n");
+  /* Enable motors after the blocking homing routine, just before cyclic commands. */
+  if (!robstride_init())
+  {
+    Error_Handler();
+  }
+  printf("Motor initialization complete\r\n");
   HAL_TIM_Base_Start_IT(&htim6);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   float target_angle1 = 0.785;
+  const uint32_t el05_startup_ms = HAL_GetTick();
+  const uint32_t el05_initial_rx_count = robstride_handler[EL05_INDEX].feedback.received_count;
+  bool el05_retry_pending = true;
   while (1)
   {
     
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* Retry once after fresh feedback, only during startup. */
+    if (el05_retry_pending)
+    {
+      const RobstrideFeedback feedback = robstride_handler[EL05_INDEX].feedback;
+      const uint32_t now_ms = HAL_GetTick();
+      if ((uint32_t)(now_ms - el05_startup_ms) >= 3000U)
+      {
+        el05_retry_pending = false;
+        printf("EL05 startup retry expired: no fresh feedback\r\n");
+      }
+      else if (feedback.online && feedback.received_count != el05_initial_rx_count &&
+               (uint32_t)(now_ms - feedback.last_leceived_ms) < 100U)
+      {
+        /* Never re-arm after a fault, a later stop, or a motor power cycle. */
+        el05_retry_pending = false;
+        if (feedback.mode == 0U && feedback.fault_flags == 0U)
+        {
+          const bool queued = robstride_start_position_pp_mode(
+              &robstride_handler[EL05_INDEX], 10, 1, 10);
+          printf("EL05 startup retry after feedback: queued=%u\r\n", (unsigned int)queued);
+        }
+      }
+    }
     robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], (target_angle[2]- 1.884));
     HAL_Delay(1);
     robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], (-target_angle[1]-1.0f));

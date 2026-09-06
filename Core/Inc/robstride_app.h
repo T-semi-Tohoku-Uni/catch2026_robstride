@@ -48,6 +48,7 @@ typedef struct
 	uint8_t fault_flags;
 
 	uint32_t last_leceived_ms;
+	uint32_t received_count;
 	bool online;
 } RobstrideFeedback;
 
@@ -56,7 +57,7 @@ typedef struct
 	uint8_t motor_id;
 	uint8_t host_id;
 
-	RobstrideFeedback feedback;
+	volatile RobstrideFeedback feedback;
 	RobstrideRunMode run_mode;
 
 	FDCAN_TxHeaderTypeDef txheader;
@@ -104,7 +105,7 @@ bool robstride_clear_fault(RobstrideMotor *motor);
 void robstride_parse_feedback(
 	uint32_t canid,
 	const uint8_t *rxdata,
-	RobstrideFeedback *feedback
+	volatile RobstrideFeedback *feedback
 );
 
 /* parameter raw func */
