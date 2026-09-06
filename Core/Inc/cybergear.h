@@ -55,6 +55,19 @@ typedef struct
 
 typedef struct
 {
+	float position_rad;
+	float velocity_rad_s;
+	float disturbance_rad_s2;
+	float reference_rad;
+	float current_a;
+	uint32_t last_update_ms;
+	uint32_t last_feedback_ms;
+	bool initialized;
+	bool active;
+} CyberGearAdrcState;
+
+typedef struct
+{
 	FDCAN_HandleTypeDef *hfdcan;
 	uint8_t motor_id;
 	uint8_t master_id;
@@ -62,6 +75,7 @@ typedef struct
 
 	FDCAN_TxHeaderTypeDef tx_header;
 	CyberGearFeedback feedback;
+	CyberGearAdrcState adrc;
 } CyberGearMotor;
 
 bool cybergear_init(
@@ -110,6 +124,9 @@ bool cybergear_set_current(
 	CyberGearMotor *motor,
 	float current_a
 );
+
+bool cybergear_start_position_adrc(CyberGearMotor *motor);
+bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad);
 
 bool cybergear_parse_feedback(
 	CyberGearMotor *motor,

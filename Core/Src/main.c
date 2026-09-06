@@ -121,13 +121,7 @@ bool cybergear_homing(void)
   HAL_Delay(10);
 
 
-  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_OPERATION)) 
-  {
-    return false;
-  }
-
-  HAL_Delay(10);
-  return cybergear_enable(&cybergear_base);
+  return cybergear_start_position_adrc(&cybergear_base);
 }
 
 bool robstride_init(void)
@@ -392,12 +386,7 @@ int main(void)
     HAL_Delay(1);
     target_angle1 = -target_angle1; 
     float target_pos = target_angle[0];
-    float target_vel = 0.0f; // 目標速度は0 (位置決め)
-    float kp = 8.0f;        // 位置ゲイン (バネの硬さ) 範囲: 0.0 ~ 500.0
-    float kd = 4.0f;         // 速度ゲイン (ダンピング/粘性) 範囲: 0.0 ~ 5.0
-    float ff_torque = 0.0f;  // フィードフォワードトルクは0
-
-    cybergear_control(&cybergear_base, target_pos, target_vel, kp, kd, ff_torque);
+    cybergear_control_position_adrc(&cybergear_base, target_pos);
     // printf("Right: %f, Left: %f, EL: %f\r\n",
     //        (target_angle[2]- 2.878),
     //        (-target_angle[1]-1.0f),
