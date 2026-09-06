@@ -6,7 +6,8 @@ set(CMAKE_CXX_COMPILER_ID GNU)
 
 # Some default GCC settings
 # arm-none-eabi- must be part of path environment
-set(TOOLCHAIN_PREFIX                arm-none-eabi-)
+set(TOOLCHAIN_PREFIX arm-none-eabi- CACHE STRING "GNU Arm toolchain path and executable prefix")
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES TOOLCHAIN_PREFIX)
 
 set(CMAKE_C_COMPILER                ${TOOLCHAIN_PREFIX}gcc)
 set(CMAKE_ASM_COMPILER              ${CMAKE_C_COMPILER})

@@ -7,3 +7,6 @@ Release/*
 .project
 build
 tmp/
+/Drivers/
+/.idea/
+/.vscode/
