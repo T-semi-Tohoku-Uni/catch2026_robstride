@@ -73,6 +73,7 @@ RobstrideMotor robstride_handler[3] = {0};
 CyberGearMotor cybergear_base;
 
 volatile float target_angle[4] = {0,0,2.0,0};
+static volatile bool el05_initializing = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -106,28 +107,31 @@ bool cybergear_homing(void)
 
   GPIO_PinState initial_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
 
-  cybergear_set_velocity(&cybergear_base, 1.0f);
+  if (!cybergear_set_velocity(&cybergear_base, 1.0f))
+  {
+    return false;
+  }
 
   while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == initial_state)
   {
     HAL_Delay(10); 
   }
 
-  cybergear_stop(&cybergear_base);
-  HAL_Delay(100); 
-
-
-  cybergear_set_zero(&cybergear_base);
-  HAL_Delay(10);
-
-
-  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_OPERATION)) 
+  if (!cybergear_stop(&cybergear_base))
   {
     return false;
   }
+  HAL_Delay(100); 
 
+
+  if (!cybergear_set_zero(&cybergear_base))
+  {
+    return false;
+  }
   HAL_Delay(10);
-  return cybergear_enable(&cybergear_base);
+
+  /* Keep stopped until all blocking motor initialization is complete. */
+  return true;
 }
 
 bool robstride_init(void)
@@ -298,6 +302,37 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
+    static uint8_t control_phase = 0U;
+
+    /* Stagger four commands across 1 ms ticks; each motor runs at 10 ms. */
+    switch (control_phase)
+    {
+      case 0U:
+        cybergear_control(&cybergear_base, target_angle[0], 0.0f, 8.0f, 4.0f, 0.0f);
+        break;
+      case 1U:
+        robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], target_angle[2] - 1.884f);
+        break;
+      case 2U:
+        robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], -target_angle[1] - 1.0f);
+        break;
+      case 3U:
+        if (!el05_initializing)
+        {
+          robstride_set_position(&robstride_handler[EL05_INDEX], target_angle[3] + 2.23f);
+        }
+        break;
+      default:
+        break;
+    }
+
+    control_phase++;
+    if (control_phase < 10U)
+    {
+      return;
+    }
+    control_phase = 0U;
+
     float send_angles[4] = {0};
     uint8_t txdata[16] = {0};
 
@@ -373,12 +408,26 @@ int main(void)
     Error_Handler();
   }
   printf("Motor initialization complete\r\n");
-  HAL_TIM_Base_Start_IT(&htim6);
+  /* Switch mode and enable immediately before starting cyclic commands. */
+  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_OPERATION))
+  {
+    printf("CyberGear operation mode send failed\r\n");
+    Error_Handler();
+  }
+  HAL_Delay(10);
+  if (!cybergear_enable(&cybergear_base))
+  {
+    printf("CyberGear enable send failed\r\n");
+    Error_Handler();
+  }
+  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  float target_angle1 = 0.785;
   const uint32_t el05_startup_ms = HAL_GetTick();
   const uint32_t el05_initial_rx_count = robstride_handler[EL05_INDEX].feedback.received_count;
   bool el05_retry_pending = true;
@@ -405,30 +454,14 @@ int main(void)
         el05_retry_pending = false;
         if (feedback.mode == 0U && feedback.fault_flags == 0U)
         {
+          el05_initializing = true;
           const bool queued = robstride_start_position_pp_mode(
               &robstride_handler[EL05_INDEX], 10, 1, 10);
+          el05_initializing = false;
           printf("EL05 startup retry after feedback: queued=%u\r\n", (unsigned int)queued);
         }
       }
     }
-    robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], (target_angle[2]- 1.884));
-    HAL_Delay(1);
-    robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], (-target_angle[1]-1.0f));
-    HAL_Delay(1);
-    robstride_set_position(&robstride_handler[EL05_INDEX], (target_angle[3] + 2.23));
-    HAL_Delay(1);
-    target_angle1 = -target_angle1; 
-    float target_pos = target_angle[0];
-    float target_vel = 0.0f; // 目標速度は0 (位置決め)
-    float kp = 8.0f;        // 位置ゲイン (バネの硬さ) 範囲: 0.0 ~ 500.0
-    float kd = 4.0f;         // 速度ゲイン (ダンピング/粘性) 範囲: 0.0 ~ 5.0
-    float ff_torque = 0.0f;  // フィードフォワードトルクは0
-
-    cybergear_control(&cybergear_base, target_pos, target_vel, kp, kd, ff_torque);
-    // printf("Right: %f, Left: %f, EL: %f\r\n",
-    //        (target_angle[2]- 2.878),
-    //        (-target_angle[1]-1.0f),
-    //        0.0f);
     
     HAL_Delay(10);
   }
@@ -587,7 +620,7 @@ static void MX_TIM6_Init(void)
   htim6.Instance = TIM6;
   htim6.Init.Prescaler = 79;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 9999;
+  htim6.Init.Period = 999;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
