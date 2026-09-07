@@ -1,5 +1,6 @@
 #include "cybergear.h"
 
+#include <math.h>
 #include <string.h>
 
 #define CYBERGEAR_POSITION_MIN_RAD        (-12.5f)
@@ -12,6 +13,15 @@
 #define CYBERGEAR_KD_MAX                  (5.0f)
 #define CYBERGEAR_TORQUE_MIN_NM           (-12.0f)
 #define CYBERGEAR_TORQUE_MAX_NM           (12.0f)
+
+#define CYBERGEAR_ADRC_B0_RAD_S2_PER_A    (10.0f)
+#define CYBERGEAR_ADRC_CONTROL_RAD_S      (3.0f)
+#define CYBERGEAR_ADRC_OBSERVER_RAD_S     (12.0f)
+#define CYBERGEAR_ADRC_CURRENT_LIMIT_A    (1.0f)
+#define CYBERGEAR_ADRC_CURRENT_SLEW_A_S   (5.0f)
+#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (0.5f)
+#define CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS (100U)
+#define CYBERGEAR_ADRC_MAX_STEP_MS        (50U)
 
 static uint32_t cybergear_make_can_id(
 	CyberGearCommunicationType communication_type,
@@ -191,6 +201,12 @@ bool cybergear_enable(CyberGearMotor *motor)
 
 bool cybergear_stop(CyberGearMotor *motor)
 {
+	if (motor != NULL)
+	{
+		motor->adrc.active = false;
+		motor->adrc.initialized = false;
+	}
+
 	return cybergear_send_empty_command(
 		motor,
 		CYBERGEAR_COMM_STOP,
@@ -200,6 +216,11 @@ bool cybergear_stop(CyberGearMotor *motor)
 
 bool cybergear_clear_fault(CyberGearMotor *motor)
 {
+	if (motor != NULL)
+	{
+		motor->adrc.active = false;
+	}
+
 	return cybergear_send_empty_command(
 		motor,
 		CYBERGEAR_COMM_STOP,
@@ -209,6 +230,11 @@ bool cybergear_clear_fault(CyberGearMotor *motor)
 
 bool cybergear_set_zero(CyberGearMotor *motor)
 {
+	if (motor != NULL)
+	{
+		motor->adrc.active = false;
+	}
+
 	return cybergear_send_empty_command(
 		motor,
 		CYBERGEAR_COMM_SET_ZERO,
@@ -293,6 +319,7 @@ bool cybergear_set_run_mode(
 	}
 
 	motor->run_mode = mode;
+	motor->adrc.active = false;
 	return true;
 }
 
@@ -361,6 +388,147 @@ bool cybergear_set_current(
 		CYBERGEAR_PARAM_IQ_REF,
 		current_a
 	);
+}
+
+static float cybergear_clamp_symmetric(float value, float limit)
+{
+	return fminf(fmaxf(value, -limit), limit);
+}
+
+bool cybergear_start_position_adrc(CyberGearMotor *motor)
+{
+	if (!cybergear_stop(motor))
+	{
+		return false;
+	}
+	HAL_Delay(10);
+	if (!cybergear_set_run_mode(motor, CYBERGEAR_RUN_MODE_CURRENT))
+	{
+		return false;
+	}
+	HAL_Delay(10);
+	if (!cybergear_set_current(motor, 0.0f))
+	{
+		return false;
+	}
+	HAL_Delay(10);
+
+	memset(&motor->adrc, 0, sizeof(motor->adrc));
+	const uint32_t interrupt_mask = __get_PRIMASK();
+	__disable_irq();
+	motor->feedback.online = false;
+	__set_PRIMASK(interrupt_mask);
+	if (!cybergear_enable(motor))
+	{
+		cybergear_stop(motor);
+		return false;
+	}
+	motor->adrc.last_update_ms = HAL_GetTick();
+	motor->adrc.active = true;
+	return true;
+}
+
+bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
+{
+	if (motor == NULL)
+	{
+		return false;
+	}
+
+	CyberGearAdrcState *state = &motor->adrc;
+	const uint32_t interrupt_mask = __get_PRIMASK();
+	__disable_irq();
+	const CyberGearFeedback feedback = motor->feedback;
+	const uint32_t now_ms = HAL_GetTick();
+	__set_PRIMASK(interrupt_mask);
+	const uint32_t elapsed_ms = now_ms - state->last_update_ms;
+
+	if (!state->active || motor->run_mode != CYBERGEAR_RUN_MODE_CURRENT ||
+		!isfinite(position_rad) || position_rad < CYBERGEAR_POSITION_MIN_RAD ||
+		position_rad > CYBERGEAR_POSITION_MAX_RAD ||
+		(feedback.online && (feedback.fault_flags != 0U ||
+			!isfinite(feedback.position_rad) ||
+			now_ms - feedback.last_received_ms > CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS)) ||
+		(!state->initialized && elapsed_ms > CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS) ||
+		(state->initialized && (elapsed_ms > CYBERGEAR_ADRC_MAX_STEP_MS ||
+			!feedback.online || feedback.mode != 2U)))
+	{
+		cybergear_stop(motor);
+		return false;
+	}
+
+	if (!state->initialized)
+	{
+		if (feedback.online && feedback.mode == 2U)
+		{
+			state->position_rad = feedback.position_rad;
+			state->reference_rad = feedback.position_rad;
+			state->last_update_ms = now_ms;
+			state->last_feedback_ms = feedback.last_received_ms;
+			state->initialized = true;
+		}
+	}
+	else if (elapsed_ms > 0U && feedback.last_received_ms != state->last_feedback_ms)
+	{
+		const float dt_s = (float)elapsed_ms * 0.001f;
+		const float observer_pole = expf(-CYBERGEAR_ADRC_OBSERVER_RAD_S * dt_s);
+		const float pole_delta = 1.0f - observer_pole;
+		const float position_gain = 1.0f - observer_pole * observer_pole * observer_pole;
+		const float velocity_gain = 1.5f * pole_delta * pole_delta *
+			(1.0f + observer_pole) / dt_s;
+		const float disturbance_gain = pole_delta * pole_delta * pole_delta /
+			(dt_s * dt_s);
+		const float acceleration_rad_s2 = state->disturbance_rad_s2 +
+			CYBERGEAR_ADRC_B0_RAD_S2_PER_A * state->current_a;
+		const float predicted_position_rad = state->position_rad +
+			dt_s * state->velocity_rad_s + 0.5f * dt_s * dt_s * acceleration_rad_s2;
+		const float innovation_rad = feedback.position_rad - predicted_position_rad;
+
+		state->position_rad = predicted_position_rad + position_gain * innovation_rad;
+		state->velocity_rad_s += dt_s * acceleration_rad_s2 + velocity_gain * innovation_rad;
+		state->disturbance_rad_s2 += disturbance_gain * innovation_rad;
+		state->reference_rad += cybergear_clamp_symmetric(
+			position_rad - state->reference_rad,
+			CYBERGEAR_ADRC_REFERENCE_RAD_S * dt_s
+		);
+
+		const float bandwidth_rad_s = CYBERGEAR_ADRC_CONTROL_RAD_S;
+		const float requested_current_a = (
+			bandwidth_rad_s * bandwidth_rad_s * (state->reference_rad - state->position_rad) -
+			2.0f * bandwidth_rad_s * state->velocity_rad_s - state->disturbance_rad_s2
+		) / CYBERGEAR_ADRC_B0_RAD_S2_PER_A;
+		if (!isfinite(state->position_rad) || !isfinite(state->velocity_rad_s) ||
+			!isfinite(state->disturbance_rad_s2) || !isfinite(requested_current_a))
+		{
+			cybergear_stop(motor);
+			return false;
+		}
+
+		const float limited_current_a = cybergear_clamp_symmetric(
+			requested_current_a,
+			CYBERGEAR_ADRC_CURRENT_LIMIT_A
+		);
+		const float current_a = state->current_a + cybergear_clamp_symmetric(
+			limited_current_a - state->current_a,
+			CYBERGEAR_ADRC_CURRENT_SLEW_A_S * dt_s
+		);
+		if (!cybergear_set_current(motor, current_a))
+		{
+			cybergear_stop(motor);
+			return false;
+		}
+		state->current_a = current_a;
+		state->last_update_ms = now_ms;
+		state->last_feedback_ms = feedback.last_received_ms;
+		return true;
+	}
+
+	if (!cybergear_set_current(motor, state->current_a))
+	{
+		cybergear_stop(motor);
+		return false;
+	}
+	return true;
 }
 
 bool cybergear_parse_feedback(

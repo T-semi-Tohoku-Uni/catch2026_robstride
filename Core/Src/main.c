@@ -326,7 +326,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     switch (control_phase)
     {
       case 0U:
-        cybergear_control(&cybergear_base, target_angle[0], 0.0f, 8.0f, 4.0f, 0.0f);
+        cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
         break;
       case 1U:
         robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], target_angle[2] - 1.884f);
@@ -436,16 +436,10 @@ int main(void)
     Error_Handler();
   }
   printf("Motor initialization complete\r\n");
-  /* Switch mode and enable immediately before starting cyclic commands. */
-  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_OPERATION))
+  /* Start ADRC after blocking initialization, immediately before cyclic commands. */
+  if (!cybergear_start_position_adrc(&cybergear_base))
   {
-    printf("CyberGear operation mode send failed\r\n");
-    Error_Handler();
-  }
-  HAL_Delay(10);
-  if (!cybergear_enable(&cybergear_base))
-  {
-    printf("CyberGear enable send failed\r\n");
+    printf("CyberGear ADRC start failed\r\n");
     Error_Handler();
   }
   if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
