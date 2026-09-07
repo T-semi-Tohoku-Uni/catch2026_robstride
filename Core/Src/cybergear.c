@@ -15,11 +15,11 @@
 #define CYBERGEAR_TORQUE_MAX_NM           (12.0f)
 
 #define CYBERGEAR_ADRC_B0_RAD_S2_PER_A    (10.0f)
-#define CYBERGEAR_ADRC_CONTROL_RAD_S      (3.0f)
+#define CYBERGEAR_ADRC_CONTROL_RAD_S      (5.0f)
 #define CYBERGEAR_ADRC_OBSERVER_RAD_S     (12.0f)
-#define CYBERGEAR_ADRC_CURRENT_LIMIT_A    (1.0f)
+#define CYBERGEAR_ADRC_CURRENT_LIMIT_A    (2.0f)
 #define CYBERGEAR_ADRC_CURRENT_SLEW_A_S   (5.0f)
-#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (0.5f)
+#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (1.0f)
 #define CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS (100U)
 #define CYBERGEAR_ADRC_MAX_STEP_MS        (50U)
 
@@ -487,15 +487,19 @@ bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
 		state->position_rad = predicted_position_rad + position_gain * innovation_rad;
 		state->velocity_rad_s += dt_s * acceleration_rad_s2 + velocity_gain * innovation_rad;
 		state->disturbance_rad_s2 += disturbance_gain * innovation_rad;
-		state->reference_rad += cybergear_clamp_symmetric(
+		const float reference_step_rad = cybergear_clamp_symmetric(
 			position_rad - state->reference_rad,
 			CYBERGEAR_ADRC_REFERENCE_RAD_S * dt_s
 		);
+		state->reference_rad += reference_step_rad;
+		/* Track the rate-limited reference velocity, including its final partial step. */
+		const float reference_velocity_rad_s = reference_step_rad / dt_s;
 
 		const float bandwidth_rad_s = CYBERGEAR_ADRC_CONTROL_RAD_S;
 		const float requested_current_a = (
-			bandwidth_rad_s * bandwidth_rad_s * (state->reference_rad - state->position_rad) -
-			2.0f * bandwidth_rad_s * state->velocity_rad_s - state->disturbance_rad_s2
+			bandwidth_rad_s * bandwidth_rad_s * (state->reference_rad - state->position_rad) +
+			2.0f * bandwidth_rad_s * (reference_velocity_rad_s - state->velocity_rad_s) -
+			state->disturbance_rad_s2
 		) / CYBERGEAR_ADRC_B0_RAD_S2_PER_A;
 		if (!isfinite(state->position_rad) || !isfinite(state->velocity_rad_s) ||
 			!isfinite(state->disturbance_rad_s2) || !isfinite(requested_current_a))

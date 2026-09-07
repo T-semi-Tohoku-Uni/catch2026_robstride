@@ -73,6 +73,7 @@ RobstrideMotor robstride_handler[3] = {0};
 CyberGearMotor cybergear_base;
 
 volatile float target_angle[4] = {0,0,2.0,0};
+static volatile bool el05_initializing = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -121,7 +122,7 @@ bool cybergear_homing(void)
   HAL_Delay(10);
 
 
-  return cybergear_start_position_adrc(&cybergear_base);
+  return true;
 }
 
 bool robstride_init(void)
@@ -292,6 +293,37 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
+    static uint8_t control_phase = 0U;
+
+    /* Stagger four commands across 1 ms ticks; each motor runs at 10 ms. */
+    switch (control_phase)
+    {
+      case 0U:
+        cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
+        break;
+      case 1U:
+        robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], target_angle[2] - 1.884f);
+        break;
+      case 2U:
+        robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], -target_angle[1] - 1.0f);
+        break;
+      case 3U:
+        if (!el05_initializing)
+        {
+          robstride_set_position(&robstride_handler[EL05_INDEX], target_angle[3] + 2.23f);
+        }
+        break;
+      default:
+        break;
+    }
+
+    control_phase++;
+    if (control_phase < 10U)
+    {
+      return;
+    }
+    control_phase = 0U;
+
     float send_angles[4] = {0};
     uint8_t txdata[16] = {0};
 
@@ -367,15 +399,24 @@ int main(void)
     Error_Handler();
   }
   printf("Motor initialization complete\r\n");
-  HAL_TIM_Base_Start_IT(&htim6);
+  /* Start ADRC after blocking initialization to avoid its 100 ms startup timeout. */
+  if (!cybergear_start_position_adrc(&cybergear_base))
+  {
+    printf("CyberGear ADRC initialization failed\r\n");
+    Error_Handler();
+  }
+  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  float target_angle1 = 0.785;
   const uint32_t el05_startup_ms = HAL_GetTick();
   const uint32_t el05_initial_rx_count = robstride_handler[EL05_INDEX].feedback.received_count;
   bool el05_retry_pending = true;
+  uint32_t cybergear_last_print_ms = HAL_GetTick();
   while (1)
   {
     
@@ -399,26 +440,36 @@ int main(void)
         el05_retry_pending = false;
         if (feedback.mode == 0U && feedback.fault_flags == 0U)
         {
+          el05_initializing = true;
           const bool queued = robstride_start_position_pp_mode(
               &robstride_handler[EL05_INDEX], 10, 1, 10);
+          el05_initializing = false;
           printf("EL05 startup retry after feedback: queued=%u\r\n", (unsigned int)queued);
         }
       }
     }
-    robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], (target_angle[2]- 1.884));
-    HAL_Delay(1);
-    robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], (-target_angle[1]-1.0f));
-    HAL_Delay(1);
-    robstride_set_position(&robstride_handler[EL05_INDEX], (target_angle[3] + 2.23));
-    HAL_Delay(1);
-    target_angle1 = -target_angle1; 
-    float target_pos = target_angle[0];
-    cybergear_control_position_adrc(&cybergear_base, target_pos);
-    // printf("Right: %f, Left: %f, EL: %f\r\n",
-    //        (target_angle[2]- 2.878),
-    //        (-target_angle[1]-1.0f),
-    //        0.0f);
     
+    const uint32_t print_now_ms = HAL_GetTick();
+    if ((uint32_t)(print_now_ms - cybergear_last_print_ms) >= 200U)
+    {
+      cybergear_last_print_ms = print_now_ms;
+      const uint32_t interrupt_mask = __get_PRIMASK();
+      __disable_irq();
+      const float target_rad = target_angle[0];
+      const float current_rad = cybergear_base.feedback.position_rad;
+      const float reference_rad = cybergear_base.adrc.reference_rad;
+      const float iq_cmd_a = cybergear_base.adrc.current_a;
+      const bool feedback_online = cybergear_base.feedback.online;
+      const uint32_t feedback_age_ms = HAL_GetTick() - cybergear_base.feedback.last_received_ms;
+      const bool adrc_active = cybergear_base.adrc.active;
+      __set_PRIMASK(interrupt_mask);
+      printf("CyberGear target=%.3f rad, current=%.3f rad\r\n",
+             (double)target_rad, (double)current_rad);
+      printf("  ref=%.3f rad, iq_cmd=%.3f A, rx_age=%lu ms, online=%u, active=%u\r\n",
+             (double)reference_rad, (double)iq_cmd_a, (unsigned long)feedback_age_ms,
+             (unsigned int)feedback_online, (unsigned int)adrc_active);
+    }
+
     HAL_Delay(10);
   }
   /* USER CODE END 3 */
@@ -576,7 +627,7 @@ static void MX_TIM6_Init(void)
   htim6.Instance = TIM6;
   htim6.Init.Prescaler = 79;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 9999;
+  htim6.Init.Period = 999;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
