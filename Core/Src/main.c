@@ -56,6 +56,7 @@
 #define EL05_INDEX 2
 
 #define CANID 0x200
+#define MOTOR_INIT_CANID 0x500
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -74,6 +75,7 @@ CyberGearMotor cybergear_base;
 
 volatile float target_angle[4] = {0,0,2.0,0};
 static volatile bool el05_initializing = false;
+static volatile bool motor_init_requested = false;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -273,6 +275,22 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
 
     switch (rxheader.Identifier)
     {
+      case MOTOR_INIT_CANID:
+      {
+        /* The first int32 is big-endian, like the other inter-board values. */
+        if (rxheader.IdType == FDCAN_STANDARD_ID &&
+            rxheader.RxFrameType == FDCAN_DATA_FRAME &&
+            rxheader.DataLength >= FDCAN_DLC_BYTES_4)
+        {
+          int32_t command;
+          u8_to_int(rxdata, &command, 4);
+          if (command == 1)
+          {
+            motor_init_requested = true;
+          }
+        }
+        break;
+      }
       case CANID: 
         float received_floats[4];
         u8_to_float(rxdata, received_floats, 16);
@@ -390,8 +408,18 @@ int main(void)
   MX_TIM6_Init();
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
-  inter_board_CAN_RxTxSettings_init(&inter_board_txheader);
-  motor_CAN_RxTxSettings_init(&motor_txheader);
+  if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK ||
+      motor_CAN_RxTxSettings_init(&motor_txheader) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* CAN reception is active; defer homing, enable and cyclic commands. */
+  while (!motor_init_requested)
+  {
+    HAL_Delay(10);
+  }
+
   if (!cybergear_base_init())
   {
     Error_Handler();
