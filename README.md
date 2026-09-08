@@ -2,6 +2,12 @@
 
 STM32G474RBTx 向けのモーター制御ファームウェアです。
 
+CyberGearの改修内容、実機必須パラメーター、調整方法は
+[実装・調整説明](docs/05_CyberGear実装と調整.md)を参照してください。
+機械可動域・許容電流・入力ゲインなどが未設定の既定値では、CyberGearは
+ホーミング開始前に起動を拒否します。実機なしの検証は
+`powershell -ExecutionPolicy Bypass -File tests/run_host_tests.ps1` で実行できます。
+
 ## Git で管理するもの
 
 - `catch2026_robstride.ioc`：ピン、周辺機能、コード生成の設定。

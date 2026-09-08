@@ -213,39 +213,26 @@ static void el05_debug_print(void)
 
 static void cybergear_debug_print(void)
 {
-  static uint32_t last_print_ms = 0U;
-  if ((uint32_t)(HAL_GetTick() - last_print_ms) < CYBERGEAR_DEBUG_INTERVAL_MS)
-  {
-    return;
-  }
-
-  /* Snapshot shared state; keep UART output outside the critical section. */
-  const uint32_t interrupt_mask = __get_PRIMASK();
-  __disable_irq();
-  const uint32_t now_ms = HAL_GetTick();
-  const CyberGearFeedback feedback = cybergear_base.feedback;
-  const CyberGearAdrcState adrc = cybergear_base.adrc;
-  const float target_rad = target_angle[0];
-  __set_PRIMASK(interrupt_mask);
-  last_print_ms = now_ms;
-
-  /* Short lines fit the existing UART write timeout at 115200 baud. */
-  printf("CG t=%lu pos=%.3f target=%.3f ref=%.3f rad\r\n",
-         (unsigned long)now_ms, (double)feedback.position_rad,
-         (double)target_rad, (double)adrc.reference_rad);
-  printf("CG iq_cmd=%.3f A vel=%.3f rad/s torque=%.3f Nm\r\n",
-         (double)adrc.current_a, (double)feedback.velocity_rad_s,
-         (double)feedback.torque_nm);
-  printf("CG err=%.3f est_vel=%.3f dist=%.3f\r\n",
-         (double)(adrc.reference_rad - feedback.position_rad),
-         (double)adrc.velocity_rad_s, (double)adrc.disturbance_rad_s2);
-  printf("CG active=%u init=%u online=%u mode=%u fault=0x%02X age=%lu ms\r\n",
-         (unsigned int)adrc.active, (unsigned int)adrc.initialized,
-         (unsigned int)feedback.online, (unsigned int)feedback.mode,
-         (unsigned int)feedback.fault_flags,
-         (unsigned long)(now_ms - feedback.last_received_ms));
+#if CYBERGEAR_LOG_UART
+  /* Drain at most one record per main iteration; keep every line < UART timeout. */
+  CyberGearLog log;
+  if (!cybergear_pop_log(&cybergear_base, &log)) return;
+  printf("CG t=%lu state=%u fault=%u drop=%lu\r\n",
+      (unsigned long)log.timestamp_ms, (unsigned)log.state,
+      (unsigned)log.fault, (unsigned long)log.drops);
+  printf("CG q=%.4f qd=%.4f vd=%.3f ad=%.3f\r\n",
+      (double)log.q, (double)log.qd, (double)log.vd, (double)log.ad);
+  printf("CG it=%.3f id=%.3f req=%.3f cmd=%.3f\r\n",
+      (double)log.i_track, (double)log.i_dist, (double)log.i_req, (double)log.i_cmd);
+  printf("CG b=%.3f age=%lu dt=%lu tx=%lu/%lu\r\n",
+      (double)log.b0, (unsigned long)log.rx_age_ms, (unsigned long)log.control_dt_ms,
+      (unsigned long)log.tx_queued, (unsigned long)log.tx_failed);
+  printf("CG lim=%u/%u/%u stop=%u/%u/%u\r\n",
+      (unsigned)log.amp_limited, (unsigned)log.slew_limited,
+      (unsigned)log.compensation_limited, (unsigned)log.stop_queued,
+      (unsigned)log.reset_confirmed, (unsigned)log.stationary);
+#endif
 }
-
 static bool cybergear_homing_feedback(CyberGearFeedback *feedback)
 {
   motor_check_feedback();
@@ -599,6 +586,13 @@ bool cybergear_base_init(void)
     return false;
   }
 
+  /* Reject incomplete machine settings before the legacy homing can energize CG. */
+  if (!cybergear_config_valid(&cybergear_base.config))
+  {
+    printf("CG machine parameters unset: see cybergear_config.h\r\n");
+    return false;
+  }
+
   /* Establish feedback before enabling motion. A queued frame is not proof
      of delivery, so retry STOP while the motor is powering up. */
   const uint32_t wait_started_ms = HAL_GetTick();
@@ -679,6 +673,18 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     motor_can_last_rx_dlc = rxheader.DataLength;
     motor_can_last_rx_id_type = rxheader.IdType;
 
+    /* CyberGear type 17/readback and type 21/fault must pass BEFORE the
+       existing RobStride type-2-only path. Keep its validation unchanged. */
+    if (cybergear_process_rx(&cybergear_base, &rxheader, rxdata))
+    {
+      if (robstride_get_communication_type(rxheader.Identifier) == FeedbackId)
+      {
+        motor_last_feedback_ms = HAL_GetTick();
+        motor_init_feedback_received = true;
+      }
+      continue;
+    }
+
     if (rxheader.IdType != FDCAN_EXTENDED_ID ||
         rxheader.RxFrameType != FDCAN_DATA_FRAME ||
         rxheader.DataLength != FDCAN_DLC_BYTES_8 ||
@@ -695,15 +701,6 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     {
       motor_last_feedback_ms = HAL_GetTick();
       motor_init_feedback_received = true;
-    }
-
-    if (cybergear_parse_feedback(
-      &cybergear_base,
-      rxheader.Identifier,
-      rxdata
-    ))
-    {
-      continue;
     }
 
     for (uint32_t i = 0; i < (sizeof(robstride_handler) / sizeof(robstride_handler[0])); i++)
@@ -811,12 +808,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
     static uint8_t control_phase = 0U;
 
-    /* Stagger four commands across 1 ms ticks; each motor runs at 10 ms. */
+    /* CG can use phase 0/5. Other axes and the board reply retain all phases. */
+    if (cybergear_control_phase_due(control_phase))
+    {
+      cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
+    }
     switch (control_phase)
     {
-      case 0U:
-        cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
-        break;
       case 1U:
         robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], target_angle[2] - 1.884f);
         break;
@@ -964,6 +962,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     motor_check_feedback();
     motor_return_update();
+    cybergear_service(&cybergear_base);
     /* Retry once after fresh feedback, only during startup. */
     if (el05_retry_pending)
     {
@@ -991,7 +990,7 @@ int main(void)
     }
     
     el05_debug_print();
-    //cybergear_debug_print();
+    cybergear_debug_print();
     HAL_Delay(10);
   }
   /* USER CODE END 3 */
