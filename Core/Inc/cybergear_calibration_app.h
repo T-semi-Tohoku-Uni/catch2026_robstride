@@ -15,6 +15,8 @@ typedef struct {
     uint32_t timestamp_ms, feedback_timestamp_ms, rx_sequence, trial_id;
     CgCalPhase phase;
     CgCalFault fault;
+    CgCalAppState app_state;
+    uint8_t motor_mode;
     float position_rad, velocity_rad_s, command_current_a, temperature_c;
     uint32_t dropped, tx_failed;
     bool feedback_valid;
@@ -26,12 +28,20 @@ typedef struct {
     CgCal core;
     CgCalAppState state;
     float initial_position_rad;
+    float startup_position_rad; /* Pinned per trial throughout the zero-current handshake. */
     bool origin_captured, quiet_active, stop_queued, reset_confirmed;
     bool stop_confirmed, dump_pending, recording, abort_requested;
     int requested_direction;
     uint32_t origin_sequence, quiet_sequence, quiet_since_ms;
     uint32_t state_ms, startup_ms, last_tick_ms, last_command_ms;
     uint32_t stop_sequence, read_sequence, trial_id, log_count, dropped;
+    /* First fault evidence, captured before STOP changes the state/feedback. */
+    bool fault_snapshot_valid;
+    CgCalAppState fault_state;
+    CgCalFault first_fault;
+    CgCalFeedback fault_feedback;
+    uint32_t fault_timestamp_ms;
+    uint8_t fault_motor_mode;
     CgCalLogRow rows[CG_CAL_APP_LOG_CAPACITY];
 } CgCalApp;
 

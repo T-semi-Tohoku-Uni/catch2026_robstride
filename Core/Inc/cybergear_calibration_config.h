@@ -11,12 +11,12 @@
 /* 計測専用の許可。通常制御の HARDWARE_CONFIRMED/b0 は変更しない。
  * 取付済み機構で許容した電流/温度/速度を入力してから1。
  * p/nキーを受けるまではSTOPのみ。試行ごとの自動増幅・自動繰返しはない。 */
-#define CG_CAL_ARMED                  0
-#define CG_CAL_PULSE_CURRENT_A        NAN /* パルス振幅 [A]。p=正、n=負に適用。 */
-#define CG_CAL_BRAKE_CURRENT_A        NAN /* 逆電流の振幅 [A]。許容値を超えない。 */
-#define CG_CAL_CURRENT_LIMIT_A        NAN /* 機構で許容した試験電流上限 [A]。自動探索しない。 */
-#define CG_CAL_TEMPERATURE_TRIP_C     NAN /* 試験を中止する温度 [℃]。定格から決める。 */
-#define CG_CAL_SPEED_TRIP_RAD_S       NAN /* 試験中の実測速度上限 [rad/s]。 */
+#define CG_CAL_ARMED                  1
+#define CG_CAL_PULSE_CURRENT_A        1.0f /* パルス振幅 [A]。p=正、n=負に適用。 */
+#define CG_CAL_BRAKE_CURRENT_A        1.0f /* 逆電流の振幅 [A]。許容値を超えない。 */
+#define CG_CAL_CURRENT_LIMIT_A        6 /* 機構で許容した試験電流上限 [A]。自動探索しない。 */
+#define CG_CAL_TEMPERATURE_TRIP_C     40 /* 試験を中止する温度 [℃]。定格から決める。 */
+#define CG_CAL_SPEED_TRIP_RAD_S       10 /* 試験中の実測速度上限 [rad/s]。 */
 
 /* 初期位置からの試験範囲。90°固定境界のかなり内側から始める。
  * SOFTは到達目標ではなく中止境界。margin+速度先読みでさらに早く中止する。
@@ -26,9 +26,14 @@
 #define CG_CAL_GUARD_MARGIN_DEG       2.0f
 #define CG_CAL_GUARD_LOOKAHEAD_MS     100U /* 現在速度×(先読み+受信鮮度)を余裕に加算。加速度保証ではない。 */
 #define CG_CAL_POSITION_JUMP_RAD      0.01f /* 速度上限×受信間隔に加えて許す位置差 [rad]。不連続を拒否。 */
-#define CG_CAL_STATIONARY_SPEED_RAD_S 0.02f /* 静止判定幅 [rad/s]。起動・制動終了・停止確認で使用。 */
-#define CG_CAL_BASELINE_MS            200U /* パルス前のゼロ電流観測。重力等で動けば中止。 */
-#define CG_CAL_PULSE_MS               200U /* max(30, 3×MAX_STEP)..500 ms。同定S/Nと移動量が増す。 */
+/* 暫定: 位置一定のゼロ電流ログで受信速度が正負に揺れ、
+ * これまでの目視静止時観測は最大約0.072 rad/s。余裕を含め0.10とする。
+ * 起動だけでなく制動終了・停止確認にも適用。全条件の静止ノイズ上限は未確認。 */
+#define CG_CAL_STATIONARY_SPEED_RAD_S 0.10f /* 静止判定幅 [rad/s]。 */
+#define CG_CAL_BASELINE_MS            200U /* パルス前の連続静止確認。ゼロ電流で観測。 */
+/* BASELINE中のみ速度超過で確認時間を再開始。開始位置から0.001 rad超の変位、
+ * またはBASELINE_MS+1000 msの総待機期限で中止。制動/COASTの判定は変更しない。 */
+#define CG_CAL_PULSE_MS               100U /* max(30, 3×MAX_STEP)..500 ms。同定S/Nと移動量が増す。 */
 #define CG_CAL_BRAKE_MS               200U /* max(30, 3×MAX_STEP)..500 ms。静止/反転検出で先に切る。 */
 #define CG_CAL_SETTLE_MS              100U /* 制動後のゼロ電流観測。低速度でこの時間を経てSTOP。 */
 #define CG_CAL_FEEDBACK_TIMEOUT_MS    30U /* 最後の受信からこの時間を超えると中止。長期化しない。 */

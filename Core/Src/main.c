@@ -1072,8 +1072,8 @@ int main(void)
     cybergear_debug_print();
     HAL_Delay(10);
   }
+#endif /* CYBERGEAR_CALIBRATION_BUILD */
   /* USER CODE END 3 */
-#endif
 }
 
 /**

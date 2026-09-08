@@ -172,7 +172,8 @@ static CgCalConfig fixture(void)
 {
     CgCalConfig config;
     cg_cal_app_config_defaults(&config);
-    assert(!config.armed && isnan(config.pulse_current_a));
+    assert(config.armed == (CG_CAL_ARMED != 0));
+    cg_cal_config_defaults(&config); /* Synthetic fixture, not installed machine settings. */
     config.armed = true;
     config.pulse_current_a = 0.05f;
     config.brake_current_a = 0.1f;
@@ -272,7 +273,7 @@ static void successful_trial_and_origin_tests(void)
     uart_status = HAL_OK;
     assert(cg_cal_app_dump(&app, &uart));
     assert(!app.dump_pending);
-    assert(strstr(uart_capture, "timestamp_ms,feedback_timestamp_ms,rx_sequence,trial_id,phase,position_rad,velocity_rad_s,command_current_a,rx_age_ms,fault,saturated,dropped,tx_failed,feedback_valid,initial_position_rad,temperature_c\r\n"));
+    assert(strstr(uart_capture, "timestamp_ms,feedback_timestamp_ms,rx_sequence,trial_id,phase,position_rad,velocity_rad_s,command_current_a,rx_age_ms,fault,saturated,dropped,tx_failed,feedback_valid,initial_position_rad,temperature_c,app_state,motor_mode\r\n"));
     assert(strstr(uart_capture, ",BASELINE,") && strstr(uart_capture, ",PULSE,") &&
            strstr(uart_capture, ",BRAKE,") && strstr(uart_capture, ",COAST,") && strstr(uart_capture, ",DONE,"));
     unsigned int old_nonzero = nonzero_currents();
@@ -457,7 +458,7 @@ static void measured_guard_and_capacity_tests(void)
     assert(cg_cal_app_request_trial(&app, 1));
     run_to(&app, CG_CAL_APP_WRITE_MODE, 30);
     unsigned int before = frame_count;
-    cycle_at(&app, simulated_position, 0.04f, true);
+    cycle_at(&app, simulated_position + 0.002f, 0.04f, true);
     assert(app.state == CG_CAL_APP_STOPPING && app.core.fault == CG_CAL_FAULT_BASELINE_MOTION);
     run_to(&app, CG_CAL_APP_FAULT, 150);
     only_stop_since(before);
@@ -466,10 +467,43 @@ static void measured_guard_and_capacity_tests(void)
     assert(cybergear_init(&motor, &can, 0x7fU, 0xfeU));
     CgCalConfig invalid;
     cg_cal_app_config_defaults(&invalid);
+    invalid.armed = false; /* Independent of the operator's installed config. */
     before = frame_count;
     assert(!cg_cal_app_init(&app, &motor, &invalid));
     assert(app.state == CG_CAL_APP_FAULT && !motor.calibration_owned);
     assert(frame_count == before && !cg_cal_app_request_trial(&app, 1));
+}
+
+static void startup_speed_noise_tests(void)
+{
+    CgCalApp app;
+    CyberGearMotor motor;
+    ready(&app, &motor);
+    assert(cg_cal_app_request_trial(&app, 1));
+    run_to(&app, CG_CAL_APP_WAIT_RUN, 50);
+    cycle_at(&app, simulated_position, -0.1515217f, true);
+    assert(app.state == CG_CAL_APP_WAIT_RUN && app.core.fault == CG_CAL_FAULT_NONE);
+    assert(nonzero_currents() == 0);
+    run_to(&app, CG_CAL_APP_TRIAL, 30);
+    assert(app.core.phase == CG_CAL_PHASE_BASELINE && nonzero_currents() == 0);
+    run_to(&app, CG_CAL_APP_DONE, 150);
+    assert(app.core.fault == CG_CAL_FAULT_NONE && nonzero_currents() > 0);
+
+    ready(&app, &motor);
+    assert(cg_cal_app_request_trial(&app, 1));
+    run_to(&app, CG_CAL_APP_WAIT_RUN, 50);
+    for (unsigned i=0; i<350 && app.state==CG_CAL_APP_WAIT_RUN; ++i)
+        cycle_at(&app, simulated_position, 0.15f, true);
+    assert(app.state == CG_CAL_APP_STOPPING && app.core.fault == CG_CAL_FAULT_FEEDBACK);
+    assert(nonzero_currents() == 0);
+    run_to(&app, CG_CAL_APP_FAULT, 150);
+
+    ready(&app, &motor);
+    assert(cg_cal_app_request_trial(&app, 1));
+    run_to(&app, CG_CAL_APP_WAIT_RUN, 50);
+    cycle_at(&app, simulated_position + 0.002f, 0.0f, true);
+    assert(app.state == CG_CAL_APP_STOPPING && app.core.fault == CG_CAL_FAULT_BASELINE_MOTION);
+    assert(nonzero_currents() == 0);
 }
 
 int main(int argc, char **argv)
@@ -477,6 +511,7 @@ int main(int argc, char **argv)
     assert(argc <= 2);
     capture_path = argc == 2 ? argv[1] : NULL;
     successful_trial_and_origin_tests();
+    startup_speed_noise_tests();
     ownership_tests();
     startup_failure_tests();
     fault_tests();

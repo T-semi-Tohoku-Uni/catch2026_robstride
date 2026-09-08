@@ -8,6 +8,10 @@
  * This is a software trip boundary, NOT a guarantee that inertia/gravity stop
  * the mechanism at that boundary. No homing, angle wrapping or zeroing occurs. */
 #define CG_CAL_ABSOLUTE_TRAVEL_RAD 1.5707963267948966f
+/* Zero-current BASELINE only: about 2.6 position feedback counts.
+ * Never re-anchor on a noisy speed sample; accumulated drift still aborts. */
+#define CG_CAL_BASELINE_DRIFT_RAD 0.001f
+#define CG_CAL_BASELINE_RETRY_MS 1000U
 
 typedef enum {
     CG_CAL_PHASE_IDLE, CG_CAL_PHASE_BASELINE, CG_CAL_PHASE_PULSE,
@@ -46,8 +50,9 @@ typedef struct {
                                  * plus feedback age; NOT a braking model. */
     float position_jump_rad;   /* Extra accepted encoder delta [rad] on top of
                                  * speed_trip * RX dt; default 0.01 rad. */
-    uint32_t baseline_ms;      /* Zero-current observation [ms], default 200.
-                                 * Must remain stationary; no holding torque. */
+    uint32_t baseline_ms;      /* Continuous quiet observation [ms], default 200.
+                                 * Speed spikes restart this zero-current window;
+                                 * fixed position drift/total wait bounds apply. */
     uint32_t pulse_ms;         /* One current pulse [ms], default 200, 30..500. */
     uint32_t brake_ms;         /* Max opposite-current interval [ms], default
                                  * 200, 30..500; nonzero speed at end faults. */
@@ -79,6 +84,8 @@ typedef struct {
     float previous_q_rad, previous_v_rad_s, previous_temp_c, brake_entry_v_rad_s;
     uint32_t phase_ms, last_step_ms, last_rx_ms, last_rx_sequence;
     uint32_t command_generation;
+    float baseline_position_rad;
+    uint32_t baseline_started_ms;
     CgCalOutput pending_output;
     bool pending_command;
 } CgCal;

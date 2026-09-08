@@ -133,6 +133,8 @@ bool cg_cal_start(CgCal *cal, const CgCalConfig *config, float origin_rad,
         return false;
     }
     cal->phase = CG_CAL_PHASE_BASELINE;
+    cal->baseline_position_rad = f->q_rad;
+    cal->baseline_started_ms = now_ms;
     cal->phase_ms = now_ms;
     cal->last_step_ms = now_ms;
     return true;
@@ -166,6 +168,7 @@ CgCalOutput cg_cal_step(CgCal *cal, const CgCalFeedback *f, uint32_t now_ms)
         return stop_output();
     }
     cal->last_step_ms = now_ms;
+    const bool new_feedback = f && f->rx_sequence != cal->last_rx_sequence;
     const CgCalFault fault = check_feedback(cal, f, now_ms, false);
     if (fault != CG_CAL_FAULT_NONE) {
         cg_cal_abort(cal, fault);
@@ -175,11 +178,20 @@ CgCalOutput cg_cal_step(CgCal *cal, const CgCalFeedback *f, uint32_t now_ms)
     const uint32_t elapsed = now_ms - cal->phase_ms;
     switch (cal->phase) {
     case CG_CAL_PHASE_BASELINE:
-        if (fabsf(f->v_rad_s) > cal->config.stationary_speed_rad_s) {
+        if (fabsf(f->q_rad - cal->baseline_position_rad) > CG_CAL_BASELINE_DRIFT_RAD ||
+            (uint32_t)(now_ms-cal->baseline_started_ms) >=
+                cal->config.baseline_ms + CG_CAL_BASELINE_RETRY_MS) {
             cg_cal_abort(cal, CG_CAL_FAULT_BASELINE_MOTION);
             return stop_output();
         }
-        if (elapsed >= cal->config.baseline_ms) enter_phase(cal, CG_CAL_PHASE_PULSE, now_ms);
+        if (fabsf(f->v_rad_s) > cal->config.stationary_speed_rad_s) {
+            /* Keep commanding zero; require a complete quiet window again.
+             * Raw speed/position trips above remain active, with a fixed
+             * baseline anchor and bounded total wait. No pulse on a spike. */
+            cal->phase_ms = now_ms;
+        } else if (new_feedback && elapsed >= cal->config.baseline_ms) {
+            enter_phase(cal, CG_CAL_PHASE_PULSE, now_ms);
+        }
         break;
     case CG_CAL_PHASE_PULSE:
         if (elapsed >= cal->config.pulse_ms) {

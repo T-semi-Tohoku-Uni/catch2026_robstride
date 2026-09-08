@@ -66,6 +66,14 @@ static bool quiet(CgCalApp *a, const CgCalFeedback *f, uint32_t now, uint8_t mod
 
 static void request_stop(CgCalApp *a, CgCalFault fault, uint32_t now)
 {
+    if (fault != CG_CAL_FAULT_NONE && !a->fault_snapshot_valid) {
+        a->fault_snapshot_valid=true;
+        a->fault_state=a->state;
+        a->first_fault=fault;
+        a->fault_feedback=snapshot(a);
+        a->fault_timestamp_ms=now;
+        a->fault_motor_mode=a->motor->feedback.mode;
+    }
     if (fault != CG_CAL_FAULT_NONE) cg_cal_abort(&a->core, fault);
     if (a->state == CG_CAL_APP_STOPPING || a->state == CG_CAL_APP_FAULT) return;
     a->state=CG_CAL_APP_STOPPING;
@@ -162,6 +170,7 @@ static void record(CgCalApp *a, const CgCalFeedback *f, uint32_t now)
     CgCalLogRow *r=&a->rows[a->log_count++];
     *r=(CgCalLogRow){.timestamp_ms=now,.feedback_timestamp_ms=f->rx_ms,.rx_sequence=f->rx_sequence,
         .trial_id=a->trial_id,.phase=a->core.phase,.fault=a->core.fault,
+        .app_state=a->state,.motor_mode=a->motor->feedback.mode,
         .position_rad=f->q_rad,.velocity_rad_s=f->v_rad_s,.temperature_c=f->temp_c,
         .command_current_a=a->core.last_current_a,.dropped=a->dropped,
         .tx_failed=a->motor->tx_failed,.feedback_valid=fresh(a,f,now)};
@@ -195,7 +204,7 @@ void cg_cal_app_tick(CgCalApp *a, uint32_t now)
         if (reason != CG_CAL_FAULT_NONE) request_stop(a,reason,now);
     }
     if (a->state >= CG_CAL_APP_WRITE_MODE && a->state <= CG_CAL_APP_WAIT_RUN &&
-        fresh(a,&f,now) && fabsf(f.v_rad_s) > a->config.stationary_speed_rad_s)
+        fresh(a,&f,now) && fabsf(f.q_rad-a->startup_position_rad) > CG_CAL_BASELINE_DRIFT_RAD)
         request_stop(a,CG_CAL_FAULT_BASELINE_MOTION,now);
     if (a->state == CG_CAL_APP_CAPTURE && !a->origin_captured && fresh(a,&f,now)) {
         /* Capture once BEFORE any mode change or ENABLE, never on p/n/re-arm. */
@@ -220,11 +229,15 @@ void cg_cal_app_tick(CgCalApp *a, uint32_t now)
         if (a->requested_direction != 0) {
             if (!quiet(a,&f,now,0U)) { if (due) ok=send_stop(a,now); break; }
             a->trial_config=a->config;
+            a->startup_position_rad=f.q_rad;
             a->trial_config.pulse_current_a=fabsf(a->config.pulse_current_a)*(float)a->requested_direction;
             a->requested_direction=0;
             cg_cal_init(&a->core);
+            a->fault_snapshot_valid=false;
             a->trial_id++;
-            a->log_count=0U; a->dropped=0U; a->recording=false;
+            /* Include mode handshake and zero-current startup in the trace.
+             * UART still drains only after STOP completes or expires. */
+            a->log_count=0U; a->dropped=0U; a->recording=true;
             a->stop_confirmed=false; a->reset_confirmed=false;
             a->startup_ms=now; a->state=CG_CAL_APP_WRITE_MODE;
             ok=send_stop(a,now); /* refresh stopped feedback before mode handshake */
@@ -263,6 +276,9 @@ void cg_cal_app_tick(CgCalApp *a, uint32_t now)
         }
         break;
     case CG_CAL_APP_WAIT_RUN:
+        /* quiet() restarts on a speed spike. Stay at zero current until the
+         * full quiet window passes; startup deadline and pinned drift guard
+         * above remain active. Never authorize a pulse from one quiet sample. */
         if (f.rx_sequence != a->stop_sequence && quiet(a,&f,now,2U)) {
             if (cg_cal_start(&a->core,&a->trial_config,a->initial_position_rad,&f,now)) {
                 a->state=CG_CAL_APP_TRIAL; a->recording=true;
@@ -326,16 +342,34 @@ bool cg_cal_app_dump(CgCalApp *a, UART_HandleTypeDef *uart)
         (unsigned long)a->trial_id,(double)a->initial_position_rad,cg_cal_fault_name(a->core.fault),
         (unsigned)a->stop_queued,(unsigned)a->reset_confirmed,(unsigned)a->stop_confirmed);
     if (written < 0 || (size_t)written >= sizeof(line) || !uart_text(uart,line)) return false;
-    if (!uart_text(uart,"timestamp_ms,feedback_timestamp_ms,rx_sequence,trial_id,phase,position_rad,velocity_rad_s,command_current_a,rx_age_ms,fault,saturated,dropped,tx_failed,feedback_valid,initial_position_rad,temperature_c\r\n")) return false;
+    if (a->fault_snapshot_valid) {
+        static const char *const states[]={"CAPTURE","READY","WRITE_MODE","READ_MODE",
+            "ZERO","ENABLE","WAIT_RUN","TRIAL","STOPPING","DONE","FAULT"};
+        const unsigned state=(unsigned)a->fault_state;
+        const CgCalFeedback *f=&a->fault_feedback;
+        written=snprintf(line,sizeof(line),
+            "# CGCAL first_fault=%s state=%s t_ms=%lu mode=%u online=%u rx_age_ms=%lu rx_seq=%lu\r\n",
+            cg_cal_fault_name(a->first_fault),state < sizeof(states)/sizeof(states[0]) ? states[state] : "UNKNOWN",
+            (unsigned long)a->fault_timestamp_ms,(unsigned)a->fault_motor_mode,(unsigned)f->online,
+            (unsigned long)(a->fault_timestamp_ms-f->rx_ms),(unsigned long)f->rx_sequence);
+        if (written < 0 || (size_t)written >= sizeof(line) || !uart_text(uart,line)) return false;
+        written=snprintf(line,sizeof(line),
+            "# CGCAL fault_sample q_rad=%.7f delta_q_rad=%.7f v_rad_s=%.7f stationary_limit_rad_s=%.7f temp_c=%.2f\r\n",
+            (double)f->q_rad,(double)(f->q_rad-a->initial_position_rad),(double)f->v_rad_s,
+            (double)a->config.stationary_speed_rad_s,(double)f->temp_c);
+        if (written < 0 || (size_t)written >= sizeof(line) || !uart_text(uart,line)) return false;
+    }
+    if (!uart_text(uart,"timestamp_ms,feedback_timestamp_ms,rx_sequence,trial_id,phase,position_rad,velocity_rad_s,command_current_a,rx_age_ms,fault,saturated,dropped,tx_failed,feedback_valid,initial_position_rad,temperature_c,app_state,motor_mode\r\n")) return false;
     for (uint32_t i=0U;i<count;++i) {
         const CgCalLogRow *r=&a->rows[i];
-        written=snprintf(line,sizeof(line),"%lu,%lu,%lu,%lu,%s,%.7f,%.7f,%.6f,%lu,%u,0,%lu,%lu,%u,%.7f,%.2f\r\n",
+        written=snprintf(line,sizeof(line),"%lu,%lu,%lu,%lu,%s,%.7f,%.7f,%.6f,%lu,%u,0,%lu,%lu,%u,%.7f,%.2f,%u,%u\r\n",
             (unsigned long)r->timestamp_ms,(unsigned long)r->feedback_timestamp_ms,
             (unsigned long)r->rx_sequence,(unsigned long)r->trial_id,cg_cal_phase_name(r->phase),
             (double)r->position_rad,(double)r->velocity_rad_s,(double)r->command_current_a,
             (unsigned long)(r->timestamp_ms-r->feedback_timestamp_ms),(unsigned)r->fault,
             (unsigned long)r->dropped,(unsigned long)r->tx_failed,(unsigned)r->feedback_valid,
-            (double)a->initial_position_rad,(double)r->temperature_c);
+            (double)a->initial_position_rad,(double)r->temperature_c,
+            (unsigned)r->app_state,(unsigned)r->motor_mode);
         if (written < 0 || (size_t)written >= sizeof(line) || !uart_text(uart,line)) return false;
     }
     mask=lock(); a->dump_pending=false; __set_PRIMASK(mask);

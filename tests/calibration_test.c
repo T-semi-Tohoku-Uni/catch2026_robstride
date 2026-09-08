@@ -159,7 +159,7 @@ static void test_feedback_faults(void)
         case 8: f.v_rad_s = 0.5f; expected = CG_CAL_FAULT_SPEED; break;
         case 9: f.temp_c = 50.0f; expected = CG_CAL_FAULT_TEMPERATURE; break;
         case 10: f.q_rad = 0.2f; expected = CG_CAL_FAULT_POSITION; break;
-        case 11: f.v_rad_s = 0.03f; expected = CG_CAL_FAULT_BASELINE_MOTION; break;
+        case 11: f.q_rad = 0.002f; f.v_rad_s = 0.03f; expected = CG_CAL_FAULT_BASELINE_MOTION; break;
         default: assert(0); break;
         }
         const CgCalOutput out = cg_cal_step(&cal, &f, 10U);
@@ -278,9 +278,57 @@ static void test_brake_timeout_and_reversal(void)
     }
 }
 
+static void test_baseline_noise_retry(void)
+{
+    CgCal cal;
+    CgCalFeedback f;
+    uint32_t now = UINT32_MAX - 50U;
+    start_fixture(&cal, &f, now);
+    cal.config.stationary_speed_rad_s = 0.1f;
+    f.v_rad_s = 0.1203938f;
+    f.q_rad = 0.0003815f;
+    CgCalOutput out = next_step(&cal, &f, &now);
+    assert(!out.stop && out.write_current && out.current_a == 0.0f);
+    assert(cg_cal_commit(&cal, &out, true));
+    f.v_rad_s = 0.0f;
+    for (unsigned i=0; i<19; ++i) {
+        out = next_step(&cal, &f, &now);
+        assert(!out.stop && cal.phase == CG_CAL_PHASE_BASELINE && out.current_a == 0.0f);
+        assert(cg_cal_commit(&cal, &out, true));
+    }
+    /* An unchanged measurement must not authorize the pulse at the boundary. */
+    now += 10U;
+    out = cg_cal_step(&cal, &f, now);
+    assert(!out.stop && cal.phase == CG_CAL_PHASE_BASELINE && out.current_a == 0.0f);
+    assert(cg_cal_commit(&cal, &out, true));
+    out = next_step(&cal, &f, &now);
+    assert(!out.stop && cal.phase == CG_CAL_PHASE_PULSE);
+    assert(cg_cal_commit(&cal, &out, true));
+
+    /* Repeated velocity spikes cannot extend the wait indefinitely. */
+    now = 0U;
+    start_fixture(&cal, &f, now);
+    f.v_rad_s = 0.03f;
+    for (unsigned i=0; i<120; ++i) {
+        out = next_step(&cal, &f, &now);
+        if (out.stop) break;
+        assert(cal.phase == CG_CAL_PHASE_BASELINE && out.current_a == 0.0f);
+        assert(cg_cal_commit(&cal, &out, true));
+    }
+    assert(out.stop && cal.fault == CG_CAL_FAULT_BASELINE_MOTION);
+
+    /* Position drift is checked even with reported speed zero. */
+    now = 0U;
+    start_fixture(&cal, &f, now);
+    f.q_rad = 0.0011f;
+    out = next_step(&cal, &f, &now);
+    assert(out.stop && cal.fault == CG_CAL_FAULT_BASELINE_MOTION);
+}
+
 void test_calibration(void)
 {
     test_configuration_and_origin();
+    test_baseline_noise_retry();
     test_synthetic_trial(1.0f, 1.0f, 0U);
     test_synthetic_trial(-1.0f, 1.0f, 0U);
     test_synthetic_trial(1.0f, -1.0f, UINT32_MAX - 50U);
