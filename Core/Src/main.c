@@ -990,8 +990,8 @@ int main(void)
       }
     }
     
-    el05_debug_print();
-    //cybergear_debug_print();
+    //el05_debug_print();
+    cybergear_debug_print();
     HAL_Delay(10);
   }
   /* USER CODE END 3 */
