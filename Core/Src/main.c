@@ -59,6 +59,7 @@
 #define CANID 0x200
 #define MOTOR_INIT_CANID 0x500
 #define CYBERGEAR_DEBUG_INTERVAL_MS 200U
+#define EL05_DEBUG_INTERVAL_MS 200U
 #define MOTOR_INIT_FEEDBACK_TIMEOUT_MS 3000U
 #define CYBERGEAR_HOMING_REVERSE_ANGLE_RAD 1.0471975512f /* 60 degrees */
 #define CYBERGEAR_HOMING_SLOW_SPEED_RAD_S 0.4f
@@ -188,6 +189,26 @@ static void motor_return_update(void)
   {
     printf("Motor return: 2 seconds elapsed; CAN commands accepted\r\n");
   }
+}
+
+static void el05_debug_print(void)
+{
+  static uint32_t last_print_ms = 0U;
+  const uint32_t now_ms = HAL_GetTick();
+  if ((uint32_t)(now_ms - last_print_ms) < EL05_DEBUG_INTERVAL_MS)
+  {
+    return;
+  }
+  last_print_ms = now_ms;
+
+  const uint32_t interrupt_mask = __get_PRIMASK();
+  __disable_irq();
+  const float position_rad = robstride_handler[EL05_INDEX].feedback.position_rad;
+  const float target_rad = -target_angle[3] - 2.963f;
+  __set_PRIMASK(interrupt_mask);
+
+  printf("EL05 pos=%.3f target=%.3f rad\r\n",
+         (double)position_rad, (double)target_rad);
 }
 
 static void cybergear_debug_print(void)
@@ -725,8 +746,9 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
             rxheader.RxFrameType == FDCAN_DATA_FRAME &&
             rxheader.DataLength >= FDCAN_DLC_BYTES_4)
         {
-          int32_t command;
+          int32_t command = 0;
           u8_to_int(rxdata, &command, 4);
+          //printf("%d\r\n",command);
           /* Use the first valid command as the baseline for change detection. */
           if (!motor_return_active && has_previous_command && command != previous_command)
           {
@@ -738,7 +760,7 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
               target_angle[0] = 0.140f;
               target_angle[1] = -0.900f;
               target_angle[2] = 1.98f;
-              target_angle[3] = 0.0f;
+              //target_angle[3] = 0.0f;
               motor_return_started_ms = HAL_GetTick();
               __set_PRIMASK(interrupt_mask);
             }
@@ -968,7 +990,8 @@ int main(void)
       }
     }
     
-    cybergear_debug_print();
+    el05_debug_print();
+    //cybergear_debug_print();
     HAL_Delay(10);
   }
   /* USER CODE END 3 */
