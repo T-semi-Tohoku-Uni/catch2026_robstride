@@ -6,6 +6,7 @@
 
 typedef enum { HAL_OK = 0, HAL_ERROR = 1, HAL_BUSY = 2, HAL_TIMEOUT = 3 } HAL_StatusTypeDef;
 typedef struct { void *Instance; uint32_t ErrorCode; } FDCAN_HandleTypeDef;
+typedef struct { void *Instance; } UART_HandleTypeDef;
 typedef struct {
     uint32_t Identifier, IdType, TxFrameType, DataLength;
     uint32_t ErrorStateIndicator, BitRateSwitch, FDFormat;
@@ -50,6 +51,8 @@ HAL_StatusTypeDef HAL_FDCAN_GetProtocolStatus(
 HAL_StatusTypeDef HAL_FDCAN_GetErrorCounters(
     const FDCAN_HandleTypeDef *hfdcan, FDCAN_ErrorCountersTypeDef *counters);
 uint32_t HAL_FDCAN_GetError(const FDCAN_HandleTypeDef *hfdcan);
+HAL_StatusTypeDef HAL_UART_Transmit(UART_HandleTypeDef *huart, const uint8_t *data,
+    uint16_t size, uint32_t timeout);
 
 static inline uint32_t __get_PRIMASK(void) { return 0U; }
 static inline void __disable_irq(void) {}

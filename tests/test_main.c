@@ -5,6 +5,7 @@ void test_controller(void);
 void test_dynamics(void);
 void test_driver(void);
 void test_controller_simulation(void);
+void test_calibration(void);
 
 int main(void)
 {
@@ -13,6 +14,7 @@ int main(void)
     test_dynamics();
     test_driver();
     test_controller_simulation();
+    test_calibration();
     puts("CyberGear host tests: all checks passed (no hardware access).");
     return 0;
 }

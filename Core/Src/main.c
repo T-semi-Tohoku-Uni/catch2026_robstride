@@ -27,6 +27,7 @@
 #include "can_init.h"
 #include "robstride_app.h"
 #include "cybergear.h"
+#include "cybergear_calibration_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -82,13 +83,18 @@ FDCAN_TxHeaderTypeDef inter_board_txheader;
 FDCAN_TxHeaderTypeDef motor_txheader;
 RobstrideMotor robstride_handler[3] = {0};
 CyberGearMotor cybergear_base;
+#if CYBERGEAR_CALIBRATION_BUILD
+static CgCalApp cybergear_calibration_app;
+#endif
 
 volatile float target_angle[4] = {0,0,2.0,0};
+#if !CYBERGEAR_CALIBRATION_BUILD
 static volatile bool el05_initializing = false;
 static volatile bool motor_init_requested = false;
 static volatile bool motors_running = false;
 static volatile bool motor_return_active = false;
 static volatile uint32_t motor_return_started_ms = 0U;
+#endif
 static volatile bool motor_init_feedback_received = false;
 static volatile uint32_t motor_last_feedback_ms = 0U;
 static volatile uint32_t motor_can_rx_count = 0U;
@@ -113,6 +119,7 @@ void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if !CYBERGEAR_CALIBRATION_BUILD
 static void motor_init_print_can_status(void)
 {
   FDCAN_ProtocolStatusTypeDef status = {0};
@@ -648,6 +655,8 @@ bool cybergear_base_init(void)
   return cybergear_enable(&cybergear_base);
 }
 
+#endif /* Normal motion/homing helpers are excluded from measurement firmware. */
+
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
   if (hfdcan->Instance != FDCAN3 ||
@@ -722,6 +731,17 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
     return;
   }
 
+#if CYBERGEAR_CALIBRATION_BUILD
+  /* Measurement accepts only local UART trial requests. Consume upper-board
+     frames without changing targets, homing requests, or return state. */
+  while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO1) > 0U)
+  {
+    FDCAN_RxHeaderTypeDef ignored_header;
+    uint8_t ignored_data[64];
+    if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO1, &ignored_header, ignored_data) != HAL_OK) break;
+  }
+#else
+
   while (HAL_FDCAN_GetRxFifoFillLevel(hfdcan, FDCAN_RX_FIFO1) > 0U)
   {
     FDCAN_RxHeaderTypeDef rxheader;
@@ -790,6 +810,7 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
         break;
     }
   }
+#endif
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -806,6 +827,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
+#if CYBERGEAR_CALIBRATION_BUILD
+    static uint8_t measurement_phase = 0U;
+    if (measurement_phase == 0U)
+      cg_cal_app_tick(&cybergear_calibration_app, HAL_GetTick());
+    measurement_phase = (uint8_t)((measurement_phase + 1U) % CG_CAL_APP_PERIOD_MS);
+#else
     static uint8_t control_phase = 0U;
 
     /* CG can use phase 0/5. Other axes and the board reply retain all phases. */
@@ -856,6 +883,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 
     // 4. FDCAN1から送信
     HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &inter_board_txheader, txdata);
+#endif
   }
 }
 /* USER CODE END 0 */
@@ -901,6 +929,57 @@ int main(void)
     Error_Handler();
   }
 
+#if CYBERGEAR_CALIBRATION_BUILD
+  /* Isolated measurement entry: no search homing, encoder zero, RS enable,
+     upper-board motion, normal ADRC, or watchdog MCU reset is reachable. */
+  CgCalConfig calibration_config;
+  cg_cal_app_config_defaults(&calibration_config);
+  if (!cybergear_init(&cybergear_base, &hfdcan3, CYBER_GEAR_ID, HOST_ID) ||
+      !cg_cal_app_init(&cybergear_calibration_app, &cybergear_base, &calibration_config))
+  {
+    const char disabled[] = "# CGCAL disabled: configure calibration current/temperature/speed and ARM\r\n";
+    HAL_UART_Transmit(&huart2, (const uint8_t *)disabled, sizeof(disabled)-1U, 100U);
+    for (unsigned int attempt=0; attempt<20U; ++attempt) { cybergear_stop(&cybergear_base); HAL_Delay(20U); }
+    while (1) HAL_Delay(10U);
+  }
+  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
+  {
+    /* The timer is unavailable, so finish bounded STOP attempts in main. */
+    cybergear_base.internal_send=true;
+    for (unsigned int attempt=0; attempt<20U; ++attempt) { cybergear_stop(&cybergear_base); HAL_Delay(20U); }
+    cybergear_base.internal_send=false;
+    while (1) HAL_Delay(10U);
+  }
+  const char help[] = "# CGCAL: wait READY; p=positive pulse, n=negative pulse, x=abort. Origin fixed until reboot.\r\n";
+  HAL_UART_Transmit(&huart2, (const uint8_t *)help, sizeof(help)-1U, 100U);
+  bool announced_ready=false;
+  while (1)
+  {
+    uint8_t key;
+    if (HAL_UART_Receive(&huart2, &key, 1U, 0U) == HAL_OK)
+    {
+      if (key == 'x' || key == 'X') cg_cal_app_abort(&cybergear_calibration_app);
+      else if (key == 'p' || key == 'P') cg_cal_app_request_trial(&cybergear_calibration_app, 1);
+      else if (key == 'n' || key == 'N') cg_cal_app_request_trial(&cybergear_calibration_app, -1);
+    }
+    const uint32_t snapshot_mask=__get_PRIMASK();
+    __disable_irq();
+    const CgCalAppState calibration_state=cybergear_calibration_app.state;
+    const bool needs_dump=cybergear_calibration_app.dump_pending;
+    const float origin=cybergear_calibration_app.initial_position_rad;
+    __set_PRIMASK(snapshot_mask);
+    if (!announced_ready && calibration_state == CG_CAL_APP_READY)
+    {
+      char ready[96];
+      int length=snprintf(ready, sizeof(ready), "# CGCAL READY origin=%.7f rad; p/n starts one trial\r\n", (double)origin);
+      if (length > 0 && (size_t)length < sizeof(ready))
+        HAL_UART_Transmit(&huart2, (const uint8_t *)ready, (uint16_t)length, 100U);
+      announced_ready=true;
+    }
+    if (needs_dump) cg_cal_app_dump(&cybergear_calibration_app, &huart2);
+    HAL_Delay(1U);
+  }
+#else
   /* CAN reception is active; defer homing, enable and cyclic commands. */
   while (!motor_init_requested)
   {
@@ -994,6 +1073,7 @@ int main(void)
     HAL_Delay(10);
   }
   /* USER CODE END 3 */
+#endif
 }
 
 /**

@@ -26,6 +26,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Core project settings
 project(${CMAKE_PROJECT_NAME})
+option(CYBERGEAR_CALIBRATION_BUILD "Build isolated CyberGear measurement firmware (UART p/n/x)" OFF)
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
 # Enable CMake support for ASM and C languages
@@ -49,6 +50,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_controller.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_trajectory.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_dynamics.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_calibration.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_calibration_app.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/robstride_app.c"
 )
 
@@ -59,7 +62,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
+    CYBERGEAR_CALIBRATION_BUILD=$<BOOL:${CYBERGEAR_CALIBRATION_BUILD}>
 )
 
 # Remove wrong libob.a library dependency when using cpp files

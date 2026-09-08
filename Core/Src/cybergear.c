@@ -443,6 +443,22 @@ bool cybergear_parse_feedback(
 	return true;
 }
 
+bool cybergear_claim_calibration(CyberGearMotor *motor, const CgCalConfig *config)
+{
+    if (motor == NULL || motor->hfdcan == NULL || motor->managed ||
+        motor->state != CG_STATE_OFF || !cg_cal_config_valid(config)) return false;
+    motor->managed = true;
+    motor->calibration_owned = true;
+    return true;
+}
+
+bool cybergear_enable_calibration(CyberGearMotor *motor, const CgCalConfig *config)
+{
+    if (motor == NULL || !motor->calibration_owned || !motor->managed ||
+        !motor->internal_send || !cg_cal_config_valid(config)) return false;
+    return cybergear_send_empty_command(motor, CYBERGEAR_COMM_ENABLE, 0);
+}
+
 static bool positive(float x) { return isfinite(x) && x > 0.0f; }
 static bool nonnegative(float x) { return isfinite(x) && x >= 0.0f; }
 static uint32_t lock_state(void) { uint32_t mask = __get_PRIMASK(); __disable_irq(); return mask; }
@@ -585,7 +601,7 @@ bool cybergear_process_rx(CyberGearMotor *m, const FDCAN_RxHeaderTypeDef *h, con
         const uint16_t index = (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
         if (index != CYBERGEAR_PARAM_RUN_MODE) return false;
         m->mode_read_sequence++;
-        if (m->mode_read_pending && m->state == CG_STATE_WAIT_MODE &&
+        if (m->mode_read_pending && (m->state == CG_STATE_WAIT_MODE || m->calibration_owned) &&
             ((h->Identifier >> 16) & 0xffU) == 0U && data[2] == 0U && data[3] == 0U) {
             m->mode_read_value = data[4];
             m->mode_read_ms = HAL_GetTick();
@@ -666,7 +682,7 @@ static void service_stop(CyberGearMotor *m, uint32_t now)
 
 bool cybergear_reset_fault(CyberGearMotor *m)
 {
-    if (m == NULL) return false;
+    if (m == NULL || m->calibration_owned) return false;
     const uint32_t mask = lock_state();
     bool ready = m->state == CG_STATE_FAULT && m->reset_confirmed && m->stationary &&
         feedback_fresh(m, HAL_GetTick()) && m->feedback.mode == 0U && m->feedback.fault_flags == 0U &&
@@ -938,7 +954,7 @@ static CyberGearFault running_protection(CyberGearMotor *m, uint32_t now)
 
 bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
 {
-    if (m == NULL || !m->managed) return false;
+    if (m == NULL || !m->managed || m->calibration_owned) return false;
     const uint32_t now = HAL_GetTick();
     const uint32_t elapsed = now - m->last_control_ms;
     FDCAN_ProtocolStatusTypeDef bus;

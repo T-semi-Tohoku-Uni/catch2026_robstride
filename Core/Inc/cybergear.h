@@ -9,6 +9,7 @@
 #include "cybergear_controller.h"
 #include "cybergear_dynamics.h"
 #include "cybergear_trajectory.h"
+#include "cybergear_calibration.h"
 
 typedef enum
 {
@@ -148,6 +149,7 @@ typedef struct
     uint32_t tracking_since_ms, saturation_since_ms, stall_since_ms;
     float requested_target_rad, stall_start_rad;
     bool managed, internal_send, prepared_ready, planning_fault, quiet_active, first_cyclic;
+    bool calibration_owned; /* Dedicated measurement owner; no normal re-arm until reboot. */
     bool tracking_active, saturation_active, stall_active;
     bool mode_read_pending, mode_read_valid;
     uint8_t mode_read_value, fault_payload[8];
@@ -172,6 +174,10 @@ bool cybergear_pop_log(CyberGearMotor *motor, CyberGearLog *log);
 bool cybergear_process_rx(CyberGearMotor *motor, const FDCAN_RxHeaderTypeDef *header,
     const uint8_t *data);
 bool cybergear_read_parameter(CyberGearMotor *motor, uint16_t index);
+/* Measurement-only ownership/ENABLE: validate its independent current/travel
+ * limits without pretending that the as-yet-unmeasured normal b0 is known. */
+bool cybergear_claim_calibration(CyberGearMotor *motor, const CgCalConfig *config);
+bool cybergear_enable_calibration(CyberGearMotor *motor, const CgCalConfig *config);
 
 bool cybergear_init(
 	CyberGearMotor *motor,

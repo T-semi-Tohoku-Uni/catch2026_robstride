@@ -3,6 +3,10 @@
 設定入口：[Core/Inc/cybergear_config.h](../Core/Inc/cybergear_config.h)。
 設定の組立て：[Core/Src/cybergear.c](../Core/Src/cybergear.c) の `cybergear_config_defaults()`。
 
+**b0・減速度などが未計測なら、先に[取付済みモーターの計測手順](08_CyberGear計測手順.md)へ。**
+計測専用設定は `cybergear_calibration_config.h`。初期位置から左右90°を外側の監視上限とし、既定±10°の内側で測る。
+通常制御の `HARDWARE_CONFIRMED` や未測定の b0 を仮入力する必要はない。
+
 **1. 初期モードを維持する**
 
 実機確認までは `CYBERGEAR_HARDWARE_CONFIRMED=0`。
