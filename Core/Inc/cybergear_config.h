@@ -10,15 +10,15 @@
 #define CYBERGEAR_HARDWARE_CONFIRMED       0
 /* 原点設定後の出力軸座標 [rad]。通信表現範囲 ±12.5 rad とは別物。
  * 内側は目標/参照の限界、外側は実測位置の保護限界。内側を厳密に包含する。 */
-#define CYBERGEAR_SOFT_MIN_RAD            NAN
-#define CYBERGEAR_SOFT_MAX_RAD            NAN
-#define CYBERGEAR_HARD_MIN_RAD            NAN
-#define CYBERGEAR_HARD_MAX_RAD            NAN
+#define CYBERGEAR_SOFT_MIN_RAD            -6.28
+#define CYBERGEAR_SOFT_MAX_RAD            6.28
+#define CYBERGEAR_HARD_MIN_RAD            -12.56
+#define CYBERGEAR_HARD_MAX_RAD            12.56
 /* 実機で許容した電流 [A]、実測速度 [rad/s]、温度 [deg C]。
  * 10 A は旧ソフト値であり定格ではない。連続運転で許容する値を使う。 */
-#define CYBERGEAR_CURRENT_LIMIT_A         NAN
-#define CYBERGEAR_SPEED_TRIP_RAD_S        NAN
-#define CYBERGEAR_TEMPERATURE_TRIP_C      NAN
+#define CYBERGEAR_CURRENT_LIMIT_A         6.0f
+#define CYBERGEAR_SPEED_TRIP_RAD_S        26.0f
+#define CYBERGEAR_TEMPERATURE_TRIP_C      85.0f
 /* 正方向電流に対する正方向加速度を確認した b0 [rad/s²/A]。
  * MIN は到達可能全姿勢・荷物・モデル誤差を含めた下限、MAX は上限。
  * FIXED は制御の代表値。軌道には MIN を使い、制御と混同しない。 */
