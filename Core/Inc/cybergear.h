@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "main.h"
+#include "cybergear_controller.h"
 
 typedef enum
 {
@@ -50,6 +51,7 @@ typedef struct
 	uint8_t fault_flags;
 
 	uint32_t last_received_ms;
+	uint32_t rx_sequence;
 	bool online;
 } CyberGearFeedback;
 
@@ -66,6 +68,33 @@ typedef struct
 	bool active;
 } CyberGearAdrcState;
 
+typedef enum { CG_DISARMED, CG_STOP_WAIT, CG_MODE_WRITE, CG_MODE_READBACK,
+    CG_ZERO_COMMAND, CG_ENABLE_WAIT, CG_OBSERVER_WARMUP, CG_RUN,
+    CG_FAULT_LATCHED } CGState;
+typedef enum { CG_FAULT_NONE, CG_FAULT_CONFIG, CG_FAULT_TX, CG_FAULT_TIMEOUT,
+    CG_FAULT_MODE, CG_FAULT_INPUT, CG_FAULT_FEEDBACK, CG_FAULT_DT,
+    CG_FAULT_RANGE, CG_FAULT_TEMPERATURE, CG_FAULT_SPEED, CG_FAULT_JUMP,
+    CG_FAULT_STALL, CG_FAULT_PLAN, CG_FAULT_BUS, CG_FAULT_DEVICE } CGFault;
+typedef struct {
+    uint32_t timestamp_ms, rx_sequence, rx_age_ms, dt_ms, tx_queued, tx_failed;
+    uint32_t fifo_free, stop_attempts, state_since_ms, last_stop_ms, baseline_sequence;
+    uint32_t observer_timestamp_ms, last_queued_ms, stall_since_ms, control_cycles;
+    uint32_t tec, rec, busoff, log_dropped, max_execution_cycles;
+    uint32_t saturation_since_ms;
+    float last_queued_current, applied_current_estimate, stall_position, last_position;
+    CGState state;
+    CGFault fault;
+    bool stop_requested, stop_queued, reset_confirmed, mechanically_stationary;
+    bool applied_current_valid;
+    bool saturation_active;
+} CGDiagnostics;
+typedef struct {
+    CGDiagnostics diagnostics;
+    CGController controller;
+    CGReference reference;
+    float target, measured_position, feedback_velocity;
+} CGLog;
+
 typedef struct
 {
 	FDCAN_HandleTypeDef *hfdcan;
@@ -76,7 +105,23 @@ typedef struct
 	FDCAN_TxHeaderTypeDef tx_header;
 	CyberGearFeedback feedback;
 	CyberGearAdrcState adrc;
+	CGConfig config;
+	CGTrajectory trajectory;
+	CGController controller;
+	CGDiagnostics diagnostics;
+	uint32_t consumed_sequence, mode_sequence, warmup_samples;
+	uint8_t confirmed_mode;
+	bool internal_owner;
+	bool state_command_queued;
+	CGLog logs[16];
+	volatile uint32_t log_head, log_tail;
 } CyberGearMotor;
+
+bool cybergear_dispatch(CyberGearMotor *motor, const FDCAN_RxHeaderTypeDef *header,
+    const uint8_t *data);
+bool cybergear_log_pop(CyberGearMotor *motor, CGLog *log);
+/* Internal driver/state-machine entry; preserves the first reason until re-init. */
+void cybergear_latch_fault(CyberGearMotor *motor, CGFault reason, uint32_t now);
 
 bool cybergear_init(
 	CyberGearMotor *motor,

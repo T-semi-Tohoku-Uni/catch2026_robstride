@@ -46,6 +46,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Core/Src/can_init.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_position.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_controller.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_trajectory.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/robstride_app.c"
 )
 

@@ -1,4 +1,5 @@
 #include "cybergear.h"
+#include "cybergear_config.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -14,28 +15,6 @@
 #define CYBERGEAR_KD_MAX                  (5.0f)
 #define CYBERGEAR_TORQUE_MIN_NM           (-12.0f)
 #define CYBERGEAR_TORQUE_MAX_NM           (12.0f)
-
-#define CYBERGEAR_ADRC_B0_RAD_S2_PER_A    (10.0f)
-/* Initial retune for fixed-target hunting in the serial log; verify on hardware.
- * Reduce position stiffness and disturbance buildup while retaining braking:
- * Kp = wc^2 / b0 = 1.6 A/rad, Kd = 2*zeta*wc / b0 = 1.6 A*s/rad.
- */
-#define CYBERGEAR_ADRC_CONTROL_RAD_S      (4.0f)
-#define CYBERGEAR_ADRC_DAMPING_RATIO      (2.0f)
-#define CYBERGEAR_ADRC_OBSERVER_RAD_S     (10.0f)
-/* Preserve load compensation away from target; forget it faster near target.
- * Blend continuously to avoid a current step at the error thresholds.
- * Keep a nonzero far leak so a blocked shaft cannot integrate indefinitely.
- */
-#define CYBERGEAR_ADRC_LEAK_NEAR_S        (0.5f)
-#define CYBERGEAR_ADRC_LEAK_FAR_S         (0.03f)
-#define CYBERGEAR_ADRC_LEAK_NEAR_RAD      (0.003f)
-#define CYBERGEAR_ADRC_LEAK_FAR_RAD       (0.015f)
-#define CYBERGEAR_ADRC_CURRENT_LIMIT_A    (10.0f)
-#define CYBERGEAR_ADRC_CURRENT_SLEW_A_S   (5.0f)
-#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (0.4f)
-#define CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS (100U)
-#define CYBERGEAR_ADRC_MAX_STEP_MS        (50U)
 
 static uint32_t cybergear_make_can_id(
 	CyberGearCommunicationType communication_type,
@@ -115,13 +94,24 @@ static bool cybergear_send(
 		return false;
 	}
 
+	const uint8_t type = cybergear_get_communication_type(can_id);
+	if ((!motor->internal_owner && motor->diagnostics.state != CG_DISARMED &&
+		type != CYBERGEAR_COMM_STOP) ||
+		(motor->diagnostics.fault != CG_FAULT_NONE && type != CYBERGEAR_COMM_STOP))
+		return false;
+	if (motor->diagnostics.fault != CG_FAULT_NONE && tx_data[0] != 0U)
+		return false; /* Latched faults allow STOP, not implicit fault clearing. */
+	motor->diagnostics.fifo_free = HAL_FDCAN_GetTxFifoFreeLevel(motor->hfdcan);
 	motor->tx_header.Identifier = can_id;
 
-	return HAL_FDCAN_AddMessageToTxFifoQ(
+	bool queued = HAL_FDCAN_AddMessageToTxFifoQ(
 		motor->hfdcan,
 		&motor->tx_header,
 		tx_data
 	) == HAL_OK;
+	if (queued) ++motor->diagnostics.tx_queued;
+	else ++motor->diagnostics.tx_failed;
+	return queued;
 }
 
 static bool cybergear_send_empty_command(
@@ -186,6 +176,7 @@ bool cybergear_init(
 
 	memset(motor, 0, sizeof(*motor));
 
+	motor->config = cybergear_config;
 	motor->hfdcan = hfdcan;
 	motor->motor_id = motor_id;
 	motor->master_id = master_id;
@@ -219,6 +210,14 @@ bool cybergear_stop(CyberGearMotor *motor)
 	{
 		motor->adrc.active = false;
 		motor->adrc.initialized = false;
+		if (!motor->internal_owner && motor->diagnostics.state != CG_DISARMED &&
+			motor->diagnostics.fault == CG_FAULT_NONE) {
+			motor->diagnostics.state = CG_FAULT_LATCHED;
+			motor->diagnostics.fault = CG_FAULT_MODE;
+			motor->diagnostics.state_since_ms = HAL_GetTick();
+			motor->diagnostics.baseline_sequence = motor->feedback.rx_sequence;
+			motor->diagnostics.stop_requested = true;
+		}
 	}
 
 	return cybergear_send_empty_command(
@@ -265,7 +264,8 @@ bool cybergear_control(
 	float feedforward_torque_nm
 )
 {
-	if (motor == NULL)
+	if (motor == NULL || !isfinite(position_rad) || !isfinite(velocity_rad_s) ||
+		!isfinite(kp) || !isfinite(kd) || !isfinite(feedforward_torque_nm))
 	{
 		return false;
 	}
@@ -343,7 +343,7 @@ bool cybergear_write_float(
 	float value
 )
 {
-	if (motor == NULL)
+	if (motor == NULL || !isfinite(value))
 	{
 		return false;
 	}
@@ -404,171 +404,6 @@ bool cybergear_set_current(
 	);
 }
 
-static float cybergear_clamp_symmetric(float value, float limit)
-{
-	return fminf(fmaxf(value, -limit), limit);
-}
-
-bool cybergear_start_position_adrc(CyberGearMotor *motor)
-{
-	/* Print before enabling control so UART latency does not age its state. */
-	printf("CG tune=3 wc=%.1f zeta=%.1f wo=%.1f\r\n",
-		(double)CYBERGEAR_ADRC_CONTROL_RAD_S,
-		(double)CYBERGEAR_ADRC_DAMPING_RATIO,
-		(double)CYBERGEAR_ADRC_OBSERVER_RAD_S);
-	printf("CG ref_rate=%.2f rad/s leak_near=%.2f far=%.2f /s\r\n",
-		(double)CYBERGEAR_ADRC_REFERENCE_RAD_S,
-		(double)CYBERGEAR_ADRC_LEAK_NEAR_S,
-		(double)CYBERGEAR_ADRC_LEAK_FAR_S);
-	printf("CG leak_error_near=%.3f far=%.3f rad\r\n",
-		(double)CYBERGEAR_ADRC_LEAK_NEAR_RAD,
-		(double)CYBERGEAR_ADRC_LEAK_FAR_RAD);
-	if (!cybergear_stop(motor))
-	{
-		return false;
-	}
-	HAL_Delay(10);
-	if (!cybergear_set_run_mode(motor, CYBERGEAR_RUN_MODE_CURRENT))
-	{
-		return false;
-	}
-	HAL_Delay(10);
-	if (!cybergear_set_current(motor, 0.0f))
-	{
-		return false;
-	}
-	HAL_Delay(10);
-
-	memset(&motor->adrc, 0, sizeof(motor->adrc));
-	const uint32_t interrupt_mask = __get_PRIMASK();
-	__disable_irq();
-	motor->feedback.online = false;
-	__set_PRIMASK(interrupt_mask);
-	if (!cybergear_enable(motor))
-	{
-		cybergear_stop(motor);
-		return false;
-	}
-	motor->adrc.last_update_ms = HAL_GetTick();
-	motor->adrc.active = true;
-	return true;
-}
-
-bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
-{
-	if (motor == NULL)
-	{
-		return false;
-	}
-
-	CyberGearAdrcState *state = &motor->adrc;
-	const uint32_t interrupt_mask = __get_PRIMASK();
-	__disable_irq();
-	const CyberGearFeedback feedback = motor->feedback;
-	const uint32_t now_ms = HAL_GetTick();
-	__set_PRIMASK(interrupt_mask);
-	const uint32_t elapsed_ms = now_ms - state->last_update_ms;
-
-	if (!state->active || motor->run_mode != CYBERGEAR_RUN_MODE_CURRENT ||
-		!isfinite(position_rad) || position_rad < CYBERGEAR_POSITION_MIN_RAD ||
-		position_rad > CYBERGEAR_POSITION_MAX_RAD ||
-		(feedback.online && (feedback.fault_flags != 0U ||
-			!isfinite(feedback.position_rad) ||
-			now_ms - feedback.last_received_ms > CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS)) ||
-		(!state->initialized && elapsed_ms > CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS) ||
-		(state->initialized && (elapsed_ms > CYBERGEAR_ADRC_MAX_STEP_MS ||
-			!feedback.online || feedback.mode != 2U)))
-	{
-		cybergear_stop(motor);
-		return false;
-	}
-
-	if (!state->initialized)
-	{
-		if (feedback.online && feedback.mode == 2U)
-		{
-			state->position_rad = feedback.position_rad;
-			state->reference_rad = feedback.position_rad;
-			state->last_update_ms = now_ms;
-			state->last_feedback_ms = feedback.last_received_ms;
-			state->initialized = true;
-		}
-	}
-	else if (elapsed_ms > 0U && feedback.last_received_ms != state->last_feedback_ms)
-	{
-		const float dt_s = (float)elapsed_ms * 0.001f;
-		const float observer_pole = expf(-CYBERGEAR_ADRC_OBSERVER_RAD_S * dt_s);
-		const float pole_delta = 1.0f - observer_pole;
-		const float position_gain = 1.0f - observer_pole * observer_pole * observer_pole;
-		const float velocity_gain = 1.5f * pole_delta * pole_delta *
-			(1.0f + observer_pole) / dt_s;
-		const float disturbance_gain = pole_delta * pole_delta * pole_delta /
-			(dt_s * dt_s);
-		const float acceleration_rad_s2 = state->disturbance_rad_s2 +
-			CYBERGEAR_ADRC_B0_RAD_S2_PER_A * state->current_a;
-		const float predicted_position_rad = state->position_rad +
-			dt_s * state->velocity_rad_s + 0.5f * dt_s * dt_s * acceleration_rad_s2;
-		const float innovation_rad = feedback.position_rad - predicted_position_rad;
-
-		state->position_rad = predicted_position_rad + position_gain * innovation_rad;
-		state->velocity_rad_s += dt_s * acceleration_rad_s2 + velocity_gain * innovation_rad;
-		state->reference_rad += cybergear_clamp_symmetric(
-			position_rad - state->reference_rad,
-			CYBERGEAR_ADRC_REFERENCE_RAD_S * dt_s
-		);
-		/* Use the ramped reference and measured position, not the final target
-		 * or the observer's load-dependent position bias, to select the leak.
-		 */
-		const float tracking_error_rad = fabsf(state->reference_rad - feedback.position_rad);
-		const float leak_blend = fminf(1.0f, fmaxf(0.0f,
-			(tracking_error_rad - CYBERGEAR_ADRC_LEAK_NEAR_RAD) /
-			(CYBERGEAR_ADRC_LEAK_FAR_RAD - CYBERGEAR_ADRC_LEAK_NEAR_RAD)));
-		const float disturbance_leak_s = CYBERGEAR_ADRC_LEAK_NEAR_S +
-			leak_blend * (CYBERGEAR_ADRC_LEAK_FAR_S - CYBERGEAR_ADRC_LEAK_NEAR_S);
-		state->disturbance_rad_s2 =
-			expf(-disturbance_leak_s * dt_s) * state->disturbance_rad_s2 +
-			disturbance_gain * innovation_rad;
-
-		const float bandwidth_rad_s = CYBERGEAR_ADRC_CONTROL_RAD_S;
-		const float requested_current_a = (
-			bandwidth_rad_s * bandwidth_rad_s * (state->reference_rad - state->position_rad) -
-			2.0f * CYBERGEAR_ADRC_DAMPING_RATIO * bandwidth_rad_s *
-			state->velocity_rad_s - state->disturbance_rad_s2
-		) / CYBERGEAR_ADRC_B0_RAD_S2_PER_A;
-		if (!isfinite(state->position_rad) || !isfinite(state->velocity_rad_s) ||
-			!isfinite(state->disturbance_rad_s2) || !isfinite(requested_current_a))
-		{
-			cybergear_stop(motor);
-			return false;
-		}
-
-		const float limited_current_a = cybergear_clamp_symmetric(
-			requested_current_a,
-			CYBERGEAR_ADRC_CURRENT_LIMIT_A
-		);
-		const float current_a = state->current_a + cybergear_clamp_symmetric(
-			limited_current_a - state->current_a,
-			CYBERGEAR_ADRC_CURRENT_SLEW_A_S * dt_s
-		);
-		if (!cybergear_set_current(motor, current_a))
-		{
-			cybergear_stop(motor);
-			return false;
-		}
-		state->current_a = current_a;
-		state->last_update_ms = now_ms;
-		state->last_feedback_ms = feedback.last_received_ms;
-		return true;
-	}
-
-	if (!cybergear_set_current(motor, state->current_a))
-	{
-		cybergear_stop(motor);
-		return false;
-	}
-	return true;
-}
-
 bool cybergear_parse_feedback(
 	CyberGearMotor *motor,
 	uint32_t can_id,
@@ -616,6 +451,37 @@ bool cybergear_parse_feedback(
 	motor->feedback.mode = (uint8_t)((data_area_2 >> 14) & 0x03U);
 	motor->feedback.last_received_ms = HAL_GetTick();
 	motor->feedback.online = true;
+	motor->feedback.rx_sequence++;
+	if (motor->feedback.fault_flags != 0U)
+		cybergear_latch_fault(motor, CG_FAULT_DEVICE, HAL_GetTick());
 
 	return true;
+}
+
+bool cybergear_dispatch(CyberGearMotor *motor, const FDCAN_RxHeaderTypeDef *header,
+    const uint8_t *data)
+{
+    if (!motor || !header || !data || !motor->hfdcan ||
+        header->IdType != FDCAN_EXTENDED_ID || header->RxFrameType != FDCAN_DATA_FRAME ||
+        header->DataLength != FDCAN_DLC_BYTES_8 || header->Identifier > 0x1fffffffUL ||
+        cybergear_get_destination_id(header->Identifier) != motor->master_id ||
+        (uint8_t)cybergear_get_data_area_2(header->Identifier) != motor->motor_id) return false;
+    uint8_t type=cybergear_get_communication_type(header->Identifier);
+    if (type == CYBERGEAR_COMM_FEEDBACK)
+        return cybergear_parse_feedback(motor,header->Identifier,data);
+    if (type == CYBERGEAR_COMM_READ_PARAMETER) {
+        if (data[0]!=0x05 || data[1]!=0x70 || data[2]!=0 || data[3]!=0 ||
+            motor->diagnostics.state!=CG_MODE_READBACK || !motor->state_command_queued ||
+            (header->Identifier & 0x00ff0000UL)!=0) return false;
+        motor->confirmed_mode=data[4]; ++motor->mode_sequence;
+        return true;
+    }
+    if (type == CYBERGEAR_COMM_FAULT_FEEDBACK) {
+        /* Preserve a latched indication independently of later healthy type-2 frames. */
+        if (data[0] || data[1] || data[2] || data[3]) {
+            cybergear_latch_fault(motor,CG_FAULT_DEVICE,HAL_GetTick());
+        }
+        return true;
+    }
+    return false;
 }
