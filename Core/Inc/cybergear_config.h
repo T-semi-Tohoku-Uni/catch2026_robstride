@@ -7,7 +7,7 @@
  * docs/05_CyberGear実装と調整.md と各 *_parameters.md を参照。
  * 機構寸法・定格・符号を推測して値を埋めない。ホスト試験は別の fixture を使う。
  */
-#define CYBERGEAR_HARDWARE_CONFIRMED       0
+#define CYBERGEAR_HARDWARE_CONFIRMED       1
 /* 原点設定後の出力軸座標 [rad]。通信表現範囲 ±12.5 rad とは別物。
  * 内側は目標/参照の限界、外側は実測位置の保護限界。内側を厳密に包含する。 */
 #define CYBERGEAR_SOFT_MIN_RAD            -6.28
@@ -22,9 +22,9 @@
 /* 正方向電流に対する正方向加速度を確認した b0 [rad/s²/A]。
  * MIN は到達可能全姿勢・荷物・モデル誤差を含めた下限、MAX は上限。
  * FIXED は制御の代表値。軌道には MIN を使い、制御と混同しない。 */
-#define CYBERGEAR_B0_FIXED                NAN
-#define CYBERGEAR_B0_MIN                  NAN
-#define CYBERGEAR_B0_MAX                  NAN
+#define CYBERGEAR_B0_FIXED                1.0
+#define CYBERGEAR_B0_MIN                  0.35
+#define CYBERGEAR_B0_MAX                  3.0
 /* 軌道の希望上限。最終加減速/jerkは電流予算でも抑える。未同定の試験開始候補。
  * 上げる順序は V → A/J → 必要なときだけ帯域。実機許容値に調整する。 */
 #define CYBERGEAR_TRAJECTORY_SPEED_RAD_S  0.4f
@@ -33,9 +33,9 @@
 #define CYBERGEAR_TRAJECTORY_JERK_RAD_S3  5.0f
 /* 制動の確認値。遅延中の外向き加速度と、その後保証できる減速度 [rad/s²]。
  * 停止余裕は delay + 電流符号反転時間も含めて評価。CAN断時の停止保証ではない。 */
-#define CYBERGEAR_BRAKE_GUARANTEED_RAD_S2 NAN
-#define CYBERGEAR_OUTWARD_ACCEL_RAD_S2   NAN
-#define CYBERGEAR_STOP_MARGIN_RAD        NAN
+#define CYBERGEAR_BRAKE_GUARANTEED_RAD_S2 1.5
+#define CYBERGEAR_OUTWARD_ACCEL_RAD_S2   16.0
+#define CYBERGEAR_STOP_MARGIN_RAD        0.10
 /* 0=100 Hz（初期値）、1=200 Hz。TIM6/他軸の周期は変えない。
  * 200 Hz は受信遅延分布/最悪ISR時間を実機確認後に使用する。 */
 #ifndef CYBERGEAR_USE_200_HZ
