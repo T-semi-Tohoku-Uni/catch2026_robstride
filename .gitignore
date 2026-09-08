@@ -1,9 +1,65 @@
+# STM32CubeMX output (regenerate from catch2026_robstride.ioc)
+/Drivers/
+/cmake/
+/CMakePresets.json
+/startup_stm32g474xx.s
+/STM32G474xx_FLASH.ld
+/Core/Inc/main.h
+/Core/Inc/stm32g4xx_hal_conf.h
+/Core/Inc/stm32g4xx_it.h
+/Core/Src/stm32g4xx_hal_msp.c
+/Core/Src/stm32g4xx_it.c
+/Core/Src/syscalls.c
+/Core/Src/sysmem.c
+/Core/Src/system_stm32g4xx.c
+# Keep main.c, the application libraries, the .ioc and root CMakeLists.txt tracked.
+
+# Local IDE/editor settings and CubeMX metadata
+/.idea/
+/.vscode/
+/.clangd
+/.cache/
+/.settings/
+/.mxproject
+/.cproject
+/.project
 *.launch
-Debug/*
-Release/*
-.settings/*
-.mxproject
-.cproject
-.project
-build
+*.code-workspace
+CMakeUserPresets.json
+
+# Build trees and CMake/Ninja generated files
+/build/
+/build-*/
+/cmake-build-*/
+/Debug/
+/Release/
+/out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+build.ninja
+rules.ninja
+.ninja_deps
+.ninja_log
+
+# Compiler and linker output
+*.o
+*.obj
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+*.d
+*.su
+*.cyclo
+
+# Temporary files
 tmp/
+*.tmp
+*.bak
+*~
+.DS_Store
+Thumbs.db
