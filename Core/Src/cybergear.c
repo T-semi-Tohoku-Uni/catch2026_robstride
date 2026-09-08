@@ -1,6 +1,7 @@
 #include "cybergear.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #define CYBERGEAR_POSITION_MIN_RAD        (-12.5f)
@@ -15,13 +16,24 @@
 #define CYBERGEAR_TORQUE_MAX_NM           (12.0f)
 
 #define CYBERGEAR_ADRC_B0_RAD_S2_PER_A    (10.0f)
-/* Increase damping and soften the observer response to reduce settling oscillation. */
-#define CYBERGEAR_ADRC_CONTROL_RAD_S      (6.0f)
-#define CYBERGEAR_ADRC_DAMPING_RATIO      (1.4f)
-#define CYBERGEAR_ADRC_OBSERVER_RAD_S     (18.0f)
+/* Initial retune for fixed-target hunting in the serial log; verify on hardware.
+ * Reduce position stiffness and disturbance buildup while retaining braking:
+ * Kp = wc^2 / b0 = 1.6 A/rad, Kd = 2*zeta*wc / b0 = 1.6 A*s/rad.
+ */
+#define CYBERGEAR_ADRC_CONTROL_RAD_S      (4.0f)
+#define CYBERGEAR_ADRC_DAMPING_RATIO      (2.0f)
+#define CYBERGEAR_ADRC_OBSERVER_RAD_S     (10.0f)
+/* Preserve load compensation away from target; forget it faster near target.
+ * Blend continuously to avoid a current step at the error thresholds.
+ * Keep a nonzero far leak so a blocked shaft cannot integrate indefinitely.
+ */
+#define CYBERGEAR_ADRC_LEAK_NEAR_S        (0.5f)
+#define CYBERGEAR_ADRC_LEAK_FAR_S         (0.03f)
+#define CYBERGEAR_ADRC_LEAK_NEAR_RAD      (0.003f)
+#define CYBERGEAR_ADRC_LEAK_FAR_RAD       (0.015f)
 #define CYBERGEAR_ADRC_CURRENT_LIMIT_A    (10.0f)
 #define CYBERGEAR_ADRC_CURRENT_SLEW_A_S   (5.0f)
-#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (1.0f)
+#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (0.4f)
 #define CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS (100U)
 #define CYBERGEAR_ADRC_MAX_STEP_MS        (50U)
 
@@ -399,6 +411,18 @@ static float cybergear_clamp_symmetric(float value, float limit)
 
 bool cybergear_start_position_adrc(CyberGearMotor *motor)
 {
+	/* Print before enabling control so UART latency does not age its state. */
+	printf("CG tune=3 wc=%.1f zeta=%.1f wo=%.1f\r\n",
+		(double)CYBERGEAR_ADRC_CONTROL_RAD_S,
+		(double)CYBERGEAR_ADRC_DAMPING_RATIO,
+		(double)CYBERGEAR_ADRC_OBSERVER_RAD_S);
+	printf("CG ref_rate=%.2f rad/s leak_near=%.2f far=%.2f /s\r\n",
+		(double)CYBERGEAR_ADRC_REFERENCE_RAD_S,
+		(double)CYBERGEAR_ADRC_LEAK_NEAR_S,
+		(double)CYBERGEAR_ADRC_LEAK_FAR_S);
+	printf("CG leak_error_near=%.3f far=%.3f rad\r\n",
+		(double)CYBERGEAR_ADRC_LEAK_NEAR_RAD,
+		(double)CYBERGEAR_ADRC_LEAK_FAR_RAD);
 	if (!cybergear_stop(motor))
 	{
 		return false;
@@ -488,11 +512,22 @@ bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
 
 		state->position_rad = predicted_position_rad + position_gain * innovation_rad;
 		state->velocity_rad_s += dt_s * acceleration_rad_s2 + velocity_gain * innovation_rad;
-		state->disturbance_rad_s2 += disturbance_gain * innovation_rad;
 		state->reference_rad += cybergear_clamp_symmetric(
 			position_rad - state->reference_rad,
 			CYBERGEAR_ADRC_REFERENCE_RAD_S * dt_s
 		);
+		/* Use the ramped reference and measured position, not the final target
+		 * or the observer's load-dependent position bias, to select the leak.
+		 */
+		const float tracking_error_rad = fabsf(state->reference_rad - feedback.position_rad);
+		const float leak_blend = fminf(1.0f, fmaxf(0.0f,
+			(tracking_error_rad - CYBERGEAR_ADRC_LEAK_NEAR_RAD) /
+			(CYBERGEAR_ADRC_LEAK_FAR_RAD - CYBERGEAR_ADRC_LEAK_NEAR_RAD)));
+		const float disturbance_leak_s = CYBERGEAR_ADRC_LEAK_NEAR_S +
+			leak_blend * (CYBERGEAR_ADRC_LEAK_FAR_S - CYBERGEAR_ADRC_LEAK_NEAR_S);
+		state->disturbance_rad_s2 =
+			expf(-disturbance_leak_s * dt_s) * state->disturbance_rad_s2 +
+			disturbance_gain * innovation_rad;
 
 		const float bandwidth_rad_s = CYBERGEAR_ADRC_CONTROL_RAD_S;
 		const float requested_current_a = (

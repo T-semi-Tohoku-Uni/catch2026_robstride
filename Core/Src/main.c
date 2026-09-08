@@ -61,7 +61,7 @@
 #define CYBERGEAR_DEBUG_INTERVAL_MS 200U
 #define MOTOR_INIT_FEEDBACK_TIMEOUT_MS 3000U
 #define CYBERGEAR_HOMING_REVERSE_ANGLE_RAD 1.0471975512f /* 60 degrees */
-#define CYBERGEAR_HOMING_SLOW_SPEED_RAD_S 0.2f
+#define CYBERGEAR_HOMING_SLOW_SPEED_RAD_S 0.4f
 #define CYBERGEAR_HOMING_CLEARANCE_RAD 0.034906585f /* 2 degrees beyond each edge */
 #define CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS 100U
 #define CYBERGEAR_HOMING_PHASE_TIMEOUT_MS 15000U
@@ -215,6 +215,9 @@ static void cybergear_debug_print(void)
   printf("CG iq_cmd=%.3f A vel=%.3f rad/s torque=%.3f Nm\r\n",
          (double)adrc.current_a, (double)feedback.velocity_rad_s,
          (double)feedback.torque_nm);
+  printf("CG err=%.3f est_vel=%.3f dist=%.3f\r\n",
+         (double)(adrc.reference_rad - feedback.position_rad),
+         (double)adrc.velocity_rad_s, (double)adrc.disturbance_rad_s2);
   printf("CG active=%u init=%u online=%u mode=%u fault=0x%02X age=%lu ms\r\n",
          (unsigned int)adrc.active, (unsigned int)adrc.initialized,
          (unsigned int)feedback.online, (unsigned int)feedback.mode,
@@ -801,7 +804,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
       case 3U:
         if (!el05_initializing)
         {
-          robstride_set_position(&robstride_handler[EL05_INDEX], target_angle[3] + 2.23f);
+          robstride_set_position(&robstride_handler[EL05_INDEX], - target_angle[3] - 2.963f);
         }
         break;
       default:
@@ -821,7 +824,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     // 1. 各モーターのフィードバックから現在角度(position_rad)を取得
     send_angles[2] = robstride_handler[RIGHT_RS03_INDEX].feedback.position_rad + 1.884;
     send_angles[1] = -(robstride_handler[LEFT_RS03_INDEX].feedback.position_rad + 1.0);
-    send_angles[3] = robstride_handler[EL05_INDEX].feedback.position_rad - 2.23;
+    send_angles[3] = -(robstride_handler[EL05_INDEX].feedback.position_rad + 2.963);
     send_angles[0] = cybergear_base.feedback.position_rad;
 
     // 2. float (4つ) を uint8_t配列 (16バイト) に変換
@@ -885,6 +888,7 @@ int main(void)
   }
 
   /* Start monitoring with initialization, then keep monitoring in normal use. */
+  const uint32_t motor_init_started_ms = HAL_GetTick();
   const uint32_t interrupt_mask = __get_PRIMASK();
   __disable_irq();
   motor_init_feedback_received = false;
@@ -910,7 +914,6 @@ int main(void)
     Error_Handler();
   }
   motor_init_wait_for_feedback();
-  printf("Motor initialization complete\r\n");
   /* Start ADRC after blocking initialization, immediately before cyclic commands. */
   if (!cybergear_start_position_adrc(&cybergear_base))
   {
@@ -922,6 +925,8 @@ int main(void)
     Error_Handler();
   }
   motors_running = true;
+  printf("Motor initialization complete: %lu ms\r\n",
+         (unsigned long)(HAL_GetTick() - motor_init_started_ms));
   /* USER CODE END 2 */
 
   /* Infinite loop */
