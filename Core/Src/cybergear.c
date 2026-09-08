@@ -15,11 +15,13 @@
 #define CYBERGEAR_TORQUE_MAX_NM           (12.0f)
 
 #define CYBERGEAR_ADRC_B0_RAD_S2_PER_A    (10.0f)
-#define CYBERGEAR_ADRC_CONTROL_RAD_S      (3.0f)
-#define CYBERGEAR_ADRC_OBSERVER_RAD_S     (12.0f)
-#define CYBERGEAR_ADRC_CURRENT_LIMIT_A    (1.0f)
+/* Increase damping and soften the observer response to reduce settling oscillation. */
+#define CYBERGEAR_ADRC_CONTROL_RAD_S      (6.0f)
+#define CYBERGEAR_ADRC_DAMPING_RATIO      (1.4f)
+#define CYBERGEAR_ADRC_OBSERVER_RAD_S     (18.0f)
+#define CYBERGEAR_ADRC_CURRENT_LIMIT_A    (10.0f)
 #define CYBERGEAR_ADRC_CURRENT_SLEW_A_S   (5.0f)
-#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (0.5f)
+#define CYBERGEAR_ADRC_REFERENCE_RAD_S    (1.0f)
 #define CYBERGEAR_ADRC_FEEDBACK_TIMEOUT_MS (100U)
 #define CYBERGEAR_ADRC_MAX_STEP_MS        (50U)
 
@@ -495,7 +497,8 @@ bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
 		const float bandwidth_rad_s = CYBERGEAR_ADRC_CONTROL_RAD_S;
 		const float requested_current_a = (
 			bandwidth_rad_s * bandwidth_rad_s * (state->reference_rad - state->position_rad) -
-			2.0f * bandwidth_rad_s * state->velocity_rad_s - state->disturbance_rad_s2
+			2.0f * CYBERGEAR_ADRC_DAMPING_RATIO * bandwidth_rad_s *
+			state->velocity_rad_s - state->disturbance_rad_s2
 		) / CYBERGEAR_ADRC_B0_RAD_S2_PER_A;
 		if (!isfinite(state->position_rad) || !isfinite(state->velocity_rad_s) ||
 			!isfinite(state->disturbance_rad_s2) || !isfinite(requested_current_a))
