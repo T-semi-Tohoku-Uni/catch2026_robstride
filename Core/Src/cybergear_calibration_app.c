@@ -158,6 +158,9 @@ static bool send_stop(CgCalApp *a, uint32_t now)
 static void record(CgCalApp *a, const CgCalFeedback *f, uint32_t now)
 {
     if (!a->recording) return;
+    /* The control tick is 100 Hz while motor feedback can be slower. Keep one
+     * row per received sample so timestamp/sequence grain remains unique. */
+    if (a->recorded_rx_sequence && f->rx_sequence == a->last_recorded_rx_sequence) return;
     /* Last slot is reserved for terminal/fault evidence. Do not silently lose
      * a plateau and then report a successful fit from the truncated trace. */
     if (a->log_count >= CG_CAL_APP_LOG_CAPACITY-1U) {
@@ -168,6 +171,8 @@ static void record(CgCalApp *a, const CgCalFeedback *f, uint32_t now)
         a->log_count=CG_CAL_APP_LOG_CAPACITY-1U;
     }
     CgCalLogRow *r=&a->rows[a->log_count++];
+    a->last_recorded_rx_sequence=f->rx_sequence;
+    a->recorded_rx_sequence=true;
     *r=(CgCalLogRow){.timestamp_ms=now,.feedback_timestamp_ms=f->rx_ms,.rx_sequence=f->rx_sequence,
         .trial_id=a->trial_id,.phase=a->core.phase,.fault=a->core.fault,
         .app_state=a->state,.motor_mode=a->motor->feedback.mode,
@@ -238,6 +243,7 @@ void cg_cal_app_tick(CgCalApp *a, uint32_t now)
             /* Include mode handshake and zero-current startup in the trace.
              * UART still drains only after STOP completes or expires. */
             a->log_count=0U; a->dropped=0U; a->recording=true;
+            a->recorded_rx_sequence=false;
             a->stop_confirmed=false; a->reset_confirmed=false;
             a->startup_ms=now; a->state=CG_CAL_APP_WRITE_MODE;
             ok=send_stop(a,now); /* refresh stopped feedback before mode handshake */

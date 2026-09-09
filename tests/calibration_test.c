@@ -325,10 +325,34 @@ static void test_baseline_noise_retry(void)
     assert(out.stop && cal.fault == CG_CAL_FAULT_BASELINE_MOTION);
 }
 
+static void test_coast_noise_retry(void)
+{
+    CgCal cal;
+    CgCalFeedback f;
+    uint32_t now=0U;
+    start_fixture(&cal,&f,now);
+    cal.phase=CG_CAL_PHASE_COAST;
+    cal.phase_ms=now;
+    cal.coast_started_ms=now;
+    f.v_rad_s=0.03f;
+    CgCalOutput out=next_step(&cal,&f,&now);
+    assert(!out.stop && out.write_current && out.current_a == 0.0f);
+    assert(cg_cal_commit(&cal,&out,true));
+    f.v_rad_s=0.0f;
+    for (unsigned i=0;i<20;++i) {
+        out=next_step(&cal,&f,&now);
+        if (out.stop) break;
+        assert(out.current_a == 0.0f);
+        assert(cg_cal_commit(&cal,&out,true));
+    }
+    assert(out.stop && cal.fault == CG_CAL_FAULT_NONE && cal.phase == CG_CAL_PHASE_STOPPING);
+}
+
 void test_calibration(void)
 {
     test_configuration_and_origin();
     test_baseline_noise_retry();
+    test_coast_noise_retry();
     test_synthetic_trial(1.0f, 1.0f, 0U);
     test_synthetic_trial(-1.0f, 1.0f, 0U);
     test_synthetic_trial(1.0f, -1.0f, UINT32_MAX - 50U);

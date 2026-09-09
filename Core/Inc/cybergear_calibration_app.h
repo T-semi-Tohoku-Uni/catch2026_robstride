@@ -35,6 +35,8 @@ typedef struct {
     uint32_t origin_sequence, quiet_sequence, quiet_since_ms;
     uint32_t state_ms, startup_ms, last_tick_ms, last_command_ms;
     uint32_t stop_sequence, read_sequence, trial_id, log_count, dropped;
+    uint32_t last_recorded_rx_sequence;
+    bool recorded_rx_sequence;
     /* First fault evidence, captured before STOP changes the state/feedback. */
     bool fault_snapshot_valid;
     CgCalAppState fault_state;

@@ -251,6 +251,8 @@ static void successful_trial_and_origin_tests(void)
     assert(!cg_cal_app_dump(&app, &uart));
     assert(uart_count == 0);
     run_to(&app, CG_CAL_APP_DONE, 200);
+    for (uint32_t i=1U;i<app.log_count;++i)
+        assert(app.rows[i].rx_sequence != app.rows[i-1U].rx_sequence);
     assert(app.core.fault == CG_CAL_FAULT_NONE && app.stop_confirmed && app.reset_confirmed);
     assert(app.trial_id == 1 && app.dump_pending && app.log_count > 40);
     assert(app.initial_position_rad == origin && app.core.initial_position_rad == origin);

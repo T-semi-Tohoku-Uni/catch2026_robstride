@@ -12,6 +12,7 @@
  * Never re-anchor on a noisy speed sample; accumulated drift still aborts. */
 #define CG_CAL_BASELINE_DRIFT_RAD 0.001f
 #define CG_CAL_BASELINE_RETRY_MS 1000U
+#define CG_CAL_COAST_RETRY_MS 1000U
 
 typedef enum {
     CG_CAL_PHASE_IDLE, CG_CAL_PHASE_BASELINE, CG_CAL_PHASE_PULSE,
@@ -86,6 +87,7 @@ typedef struct {
     uint32_t command_generation;
     float baseline_position_rad;
     uint32_t baseline_started_ms;
+    uint32_t coast_started_ms;
     CgCalOutput pending_output;
     bool pending_command;
 } CgCal;

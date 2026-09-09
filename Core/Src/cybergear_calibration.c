@@ -152,6 +152,12 @@ static void enter_phase(CgCal *cal, CgCalPhase phase, uint32_t now_ms)
     cal->phase_ms = now_ms;
 }
 
+static void enter_coast(CgCal *cal, uint32_t now_ms)
+{
+    enter_phase(cal, CG_CAL_PHASE_COAST, now_ms);
+    cal->coast_started_ms = now_ms;
+}
+
 CgCalOutput cg_cal_step(CgCal *cal, const CgCalFeedback *f, uint32_t now_ms)
 {
     CgCalOutput out = {false, false, 0.0f, 0U};
@@ -196,8 +202,9 @@ CgCalOutput cg_cal_step(CgCal *cal, const CgCalFeedback *f, uint32_t now_ms)
     case CG_CAL_PHASE_PULSE:
         if (elapsed >= cal->config.pulse_ms) {
             cal->brake_entry_v_rad_s = f->v_rad_s;
-            enter_phase(cal, fabsf(f->v_rad_s) <= cal->config.stationary_speed_rad_s ?
-                CG_CAL_PHASE_COAST : CG_CAL_PHASE_BRAKE, now_ms);
+            if (fabsf(f->v_rad_s) <= cal->config.stationary_speed_rad_s)
+                enter_coast(cal, now_ms);
+            else enter_phase(cal, CG_CAL_PHASE_BRAKE, now_ms);
         }
         break;
     case CG_CAL_PHASE_BRAKE:
@@ -205,18 +212,22 @@ CgCalOutput cg_cal_step(CgCal *cal, const CgCalFeedback *f, uint32_t now_ms)
          * current-to-acceleration polarity is negative. */
         if (fabsf(f->v_rad_s) <= cal->config.stationary_speed_rad_s ||
             f->v_rad_s * cal->brake_entry_v_rad_s <= 0.0f)
-            enter_phase(cal, CG_CAL_PHASE_COAST, now_ms);
+            enter_coast(cal, now_ms);
         else if (elapsed >= cal->config.brake_ms) {
             cg_cal_abort(cal, CG_CAL_FAULT_BRAKE_TIMEOUT);
             return stop_output();
         }
         break;
     case CG_CAL_PHASE_COAST:
-        if (fabsf(f->v_rad_s) > cal->config.stationary_speed_rad_s) {
+        if ((uint32_t)(now_ms-cal->coast_started_ms) >=
+                cal->config.settle_ms + CG_CAL_COAST_RETRY_MS) {
             cg_cal_abort(cal, CG_CAL_FAULT_BASELINE_MOTION);
             return stop_output();
-        }
-        if (elapsed >= cal->config.settle_ms) {
+        } else if (fabsf(f->v_rad_s) > cal->config.stationary_speed_rad_s) {
+            /* Opposing-current removal can expose one delayed/noisy velocity
+             * sample. Keep zero current and restart the quiet window. */
+            cal->phase_ms = now_ms;
+        } else if (new_feedback && elapsed >= cal->config.settle_ms) {
             enter_phase(cal, CG_CAL_PHASE_STOPPING, now_ms);
             return stop_output();
         }
