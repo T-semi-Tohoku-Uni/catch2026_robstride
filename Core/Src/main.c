@@ -116,6 +116,7 @@ int main(void)
   MX_TIM6_Init();
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
+  printf("start\r\n");
   motor_app_start();
   /* USER CODE END 2 */
 

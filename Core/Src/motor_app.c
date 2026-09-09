@@ -341,8 +341,9 @@ void motor_app_receive_command(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
               motor_return_started_ms = HAL_GetTick();
               __set_PRIMASK(interrupt_mask);
             }
-            else
+            else if (previous_command == 0 && command == 1)
             {
+              /* Initialization requires a received 0 -> 1 transition. */
               motor_init_requested = true;
             }
           }

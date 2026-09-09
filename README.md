@@ -16,4 +16,4 @@ cmake --build --preset Release
 ```
 
 生成物は`build/Debug/catch2026_robstride.elf`または`build/Release/catch2026_robstride.elf`です。
-電源投入後はCAN指令待ちとなり、標準ID `0x500`の先頭int32値が初回受信値から変化すると初期化・原点探索を開始します。
+電源投入後はCAN指令待ちとなり、標準ID `0x500`の先頭int32値が `0 → 1` に変化すると初期化・原点探索を開始します。初回受信が `1` の場合は開始せず、先に `0` を受信する必要があります。
