@@ -1,4 +1,5 @@
 #include "cybergear.h"
+#include "cybergear_test_motion.h"
 
 #include <assert.h>
 #include <math.h>
@@ -125,9 +126,8 @@ static void mode_reply(CyberGearMotor *motor, uint8_t mode)
     assert(cybergear_process_rx(motor, &header, data));
 }
 
-static void start(CyberGearMotor *motor, CyberGearRunMode mode)
+static void start_configured(CyberGearMotor *motor, CyberGearRunMode mode)
 {
-    configure(motor);
     unsigned int consumed = tx_count;
     uint8_t run_state = 0U;
     assert(cybergear_begin_position_control(motor, mode));
@@ -147,6 +147,12 @@ static void start(CyberGearMotor *motor, CyberGearRunMode mode)
     assert(motor->state == CG_STATE_RUNNING);
     assert(motor->fault == CG_FAULT_NONE);
     assert(motor->mode_read_valid && motor->mode_read_value == (uint8_t)mode);
+}
+
+static void start(CyberGearMotor *motor, CyberGearRunMode mode)
+{
+    configure(motor);
+    start_configured(motor, mode);
 }
 
 static void normal_tick(CyberGearMotor *motor, float target)
@@ -215,6 +221,7 @@ static void startup_and_fault_tests(void)
     CyberGearMotor motor;
     clear_mock(100U);
     assert(cybergear_init(&motor, &can, 0x7fU, 0xfeU));
+    motor.config.hardware_confirmed = false; /* Explicit unresolved-machine fixture. */
     assert(!cybergear_config_valid(&motor.config));
     assert(!cybergear_begin_position_control(&motor, CYBERGEAR_RUN_MODE_CURRENT));
     assert(tx_count == 0U); /* An unresolved mechanical setup cannot enable. */
@@ -426,13 +433,81 @@ static void unmanaged_fault_gate_test(void)
     }
 }
 
+static void standalone_stop_margin_test(void)
+{
+    CyberGearMotor motor;
+    /* Reproduce the reported STOP_MARGIN at near-zero position/velocity. */
+    clear_mock(1000U);
+    assert(cybergear_init(&motor, &can, 0x7fU, 0xfeU));
+    start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+    tick_ms += motor.config.controller.period_ms;
+    feedback(&motor, 2U, -0.04f, 0.05f, 27.0f, 0U);
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    assert(motor.fault == CG_FAULT_STOP_MARGIN);
+
+    const float limits[] = {0.5f, CG_TEST_CURRENT_LIMIT_A};
+    for (unsigned int limit_index = 0; limit_index < sizeof(limits) / sizeof(limits[0]); ++limit_index) {
+      for (int direction = -1; direction <= 1; direction += 2) {
+        clear_mock(1000U);
+        assert(cybergear_init(&motor, &can, 0x7fU, 0xfeU));
+        const CyberGearConfig original = motor.config;
+        motor.config.controller.current_limit_a = limits[limit_index];
+        assert(cybergear_test_configure(&motor));
+        assert(cybergear_config_valid(&motor.config));
+        assert(motor.config.controller.current_limit_a == limits[limit_index]);
+        assert(motor.config.dynamics.braking_current_a == limits[limit_index]);
+        assert(motor.config.dynamics.acceleration_current_a == limits[limit_index]);
+        assert(motor.config.dynamics.reserve_current_a == 0.5f * limits[limit_index]);
+        assert(motor.config.brake_guaranteed_rad_s2 == original.brake_guaranteed_rad_s2);
+        assert(motor.config.outward_accel_rad_s2 == original.outward_accel_rad_s2);
+        assert(motor.config.stop_margin_rad == original.stop_margin_rad);
+        start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+        CgTrajectory swing;
+        CgTrajectoryPoint origin = {0};
+        origin.q_rad = -CG_TEST_AMPLITUDE_RAD;
+        assert(cg_trajectory_reset(&swing, &origin, &motor.effective_limits));
+        assert(cg_trajectory_plan(&swing, CG_TEST_AMPLITUDE_RAD, &motor.effective_limits));
+        assert(swing.duration_s + (double)CG_TEST_DWELL_MS / 1000.0 <
+               (double)CG_TEST_LEG_TIMEOUT_MS / 1000.0);
+        /* Confirm that the requested 3 A is accepted at the controller boundary. */
+        assert(cybergear_controller_commit_queued(&motor.controller, limits[limit_index] * direction, tick_ms));
+        assert(!cybergear_controller_commit_queued(&motor.controller, (limits[limit_index] + 0.01f) * direction, tick_ms));
+        tick_ms += motor.config.controller.period_ms;
+        feedback(&motor, 2U, -0.04f, 0.05f * direction, 27.0f, 0U);
+        const bool running = cybergear_control_position_adrc(&motor, 0.0f);
+        if (limits[limit_index] == 3.0f) {
+            /* The present stopping-distance assumptions still reject 3 A.
+             * Expose this limitation rather than silently disabling protection. */
+            assert(!running && motor.fault == CG_FAULT_STOP_MARGIN);
+            continue;
+        }
+        assert(running);
+        assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+        assert(fabsf(motor.controller.last_queued_current_a) <= 0.5f);
+
+        /* The same protection must still trip near a hard boundary. */
+        const float boundary = direction > 0 ? motor.config.hard_max_rad - 0.01f : motor.config.hard_min_rad + 0.01f;
+        motor.controller.last_measured_position_rad = boundary;
+        tick_ms += motor.config.controller.period_ms;
+        feedback(&motor, 2U, boundary, 0.05f * direction, 27.0f, 0U);
+        (void)cybergear_control_position_adrc(&motor, 0.0f);
+        assert(motor.fault == CG_FAULT_STOP_MARGIN);
+      }
+    }
+}
+
 void test_driver(void)
 {
+    CyberGearConfig actual_config;
+    cybergear_config_defaults(&actual_config);
+    /* Catch a confirmed machine configuration that would reject every boot. */
+    if (actual_config.hardware_confirmed) assert(cybergear_config_valid(&actual_config));
     protocol_tests();
     startup_and_fault_tests();
     long_hold_wrap_test();
     rejected_startup_tests();
     streaming_and_protection_tests();
     unmanaged_fault_gate_test();
+    standalone_stop_margin_test();
     puts("Driver: protocol, ownership, startup, faults, TX failure, and wrap passed.");
 }

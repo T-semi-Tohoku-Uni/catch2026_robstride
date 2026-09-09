@@ -2,6 +2,8 @@
 from pathlib import Path
 import subprocess
 import sys
+sys.dont_write_bytecode = True
+from compile_host import compile_host
 
 
 def callback(source: str, name: str = "HAL_TIM_PeriodElapsedCallback") -> str:
@@ -22,6 +24,7 @@ PREFIX = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include "cybergear.h"
+#include "app_mode.h"
 #define FDCAN_DLC_BYTES_16 0x000a0000U
 #define RIGHT_RS03_INDEX 0
 #define LEFT_RS03_INDEX 1
@@ -81,9 +84,11 @@ int main(void)
     assert(cg_calls == 0U && board_calls == 0U);
     for (unsigned int i = 0; i < 1000U; ++i) HAL_TIM_PeriodElapsedCallback(&htim6);
     assert(cg_calls == (CYBERGEAR_USE_200_HZ ? 200U : 100U));
-    for (unsigned int i = 0; i < 3U; ++i) assert(rs_calls[i] == 100U);
-    assert(board_calls == 100U);
+    for (unsigned int i = 0; i < 3U; ++i)
+        assert(rs_calls[i] == (APP_CYBERGEAR_STANDALONE_TEST ? 0U : 100U));
+    assert(board_calls == (APP_CYBERGEAR_STANDALONE_TEST ? 0U : 100U));
     assert(cg_target == target_angle[0]);
+    if (!APP_CYBERGEAR_STANDALONE_TEST) {
     assert(fabsf(rs_target[0] - (target_angle[2] - 1.884f)) < 1e-6f);
     assert(fabsf(rs_target[1] - (-target_angle[1] - 1.0f)) < 1e-6f);
     assert(fabsf(rs_target[2] - (-target_angle[3] - 2.963f)) < 1e-6f);
@@ -91,12 +96,18 @@ int main(void)
     assert(fabsf(reported[1] + 1.4f) < 1e-6f);
     assert(fabsf(reported[2] - 2.084f) < 1e-6f);
     assert(fabsf(reported[3] + 2.363f) < 1e-6f);
+    }
     cybergear_base.state = CG_STATE_FAULT;
     el05_initializing = true;
     for (unsigned int i = 0; i < 1000U; ++i) HAL_TIM_PeriodElapsedCallback(&htim6);
     assert(cg_calls == (CYBERGEAR_USE_200_HZ ? 400U : 200U));
-    assert(rs_calls[0] == 200U && rs_calls[1] == 200U && rs_calls[2] == 100U);
-    assert(board_calls == 200U);
+    if (APP_CYBERGEAR_STANDALONE_TEST) {
+        assert(rs_calls[0] == 0U && rs_calls[1] == 0U && rs_calls[2] == 0U);
+        assert(board_calls == 0U);
+    } else {
+        assert(rs_calls[0] == 200U && rs_calls[1] == 200U && rs_calls[2] == 100U);
+        assert(board_calls == 200U);
+    }
     puts("Real TIM6 callback: cadence, offsets, and fault scheduling passed.");
     return 0;
 }
@@ -110,12 +121,12 @@ def main() -> None:
     generated = output / "scheduler_test_generated.c"
     generated.write_text(PREFIX + source + SUFFIX, encoding="utf-8")
     for high_rate in (0, 1):
-        binary = output / f"scheduler_{high_rate}.exe"
-        subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-UNDEBUG",
-                        f"-DCYBERGEAR_USE_200_HZ={high_rate}", "-I" + str(repo / "tests/stubs"),
-                        "-I" + str(repo / "Core/Inc"), str(generated), "-o", str(binary), "-lm"],
-                       check=True)
-        subprocess.run([str(binary)], check=True)
+        for standalone in (0, 1):
+            binary = output / f"scheduler_{high_rate}_{standalone}.exe"
+            compile_host(compiler, repo, generated, binary,
+                         [f"CYBERGEAR_USE_200_HZ={high_rate}",
+                          f"APP_CYBERGEAR_STANDALONE_TEST={standalone}"])
+            subprocess.run([str(binary)], check=True)
 
 
 if __name__ == "__main__":

@@ -33,6 +33,8 @@ enable_language(C ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+set(CATCH_FIRMWARE_BASENAME "${CMAKE_PROJECT_NAME}" CACHE STRING "Firmware filename without extension")
+set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME "${CATCH_FIRMWARE_BASENAME}")
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
@@ -49,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_controller.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_trajectory.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_dynamics.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_test_motion.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/robstride_app.c"
 )
 

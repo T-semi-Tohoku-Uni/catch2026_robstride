@@ -12,8 +12,9 @@
  * 内側は目標/参照の限界、外側は実測位置の保護限界。内側を厳密に包含する。 */
 #define CYBERGEAR_SOFT_MIN_RAD            -6.28
 #define CYBERGEAR_SOFT_MAX_RAD            6.28
-#define CYBERGEAR_HARD_MIN_RAD            -12.56
-#define CYBERGEAR_HARD_MAX_RAD            12.56
+/* Keep protection boundaries within the protocol position range (+/-12.5). */
+#define CYBERGEAR_HARD_MIN_RAD            -12.5f
+#define CYBERGEAR_HARD_MAX_RAD            12.5f
 /* 実機で許容した電流 [A]、実測速度 [rad/s]、温度 [deg C]。
  * 10 A は旧ソフト値であり定格ではない。連続運転で許容する値を使う。 */
 #define CYBERGEAR_CURRENT_LIMIT_A         6.0f

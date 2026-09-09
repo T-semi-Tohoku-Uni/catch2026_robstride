@@ -4,6 +4,7 @@ import subprocess
 import sys
 sys.dont_write_bytecode = True
 from check_scheduler import callback
+from compile_host import compile_host
 
 PREFIX = r'''
 #include <assert.h>
@@ -101,9 +102,7 @@ def main() -> None:
     generated = output / "rx_dispatch_generated.c"
     generated.write_text(PREFIX + source + SUFFIX, encoding="utf-8")
     binary = output / "rx_dispatch.exe"
-    subprocess.run([compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-UNDEBUG",
-                    "-I" + str(repo / "tests/stubs"), "-I" + str(repo / "Core/Inc"),
-                    str(generated), "-o", str(binary)], check=True)
+    compile_host(compiler, repo, generated, binary)
     subprocess.run([str(binary)], check=True)
 
 
