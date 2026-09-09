@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.22)
+project(motor_host_tests C)
+enable_testing()
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+add_executable(board_protocol_test board_protocol_test.c ../Core/Src/board_protocol.c)
+target_include_directories(board_protocol_test PRIVATE ../Core/Inc)
+add_test(NAME board_protocol COMMAND board_protocol_test)
+
+# Copy the public header so its quoted main.h resolves to the host HAL stub.
+configure_file(../Core/Inc/cybergear.h include/cybergear.h COPYONLY)
+configure_file(../Core/Inc/cybergear_homing.h include/cybergear_homing.h COPYONLY)
+add_executable(homing_test homing_test.c ../Core/Src/cybergear_homing.c)
+target_include_directories(homing_test PRIVATE stubs "${CMAKE_CURRENT_BINARY_DIR}/include" ../Core/Inc)
+add_test(NAME homing COMMAND homing_test)
+
+foreach(target board_protocol_test homing_test)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX /utf-8)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
+        target_link_libraries(${target} PRIVATE m)
+    endif()
+endforeach()
