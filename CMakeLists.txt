@@ -28,11 +28,24 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
+# CubeMX's contiguous 128K script does not match STM32G474RB DBANK=1.
+# Keep the board-specific script tracked outside the regenerated cmake/ tree.
+set(CATCH_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/linker/STM32G474RB_dualbank.ld")
+string(REPLACE "-T \"${CMAKE_SOURCE_DIR}/STM32G474xx_FLASH.ld\"" ""
+    CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+string(REPLACE "-T${CMAKE_SOURCE_DIR}/STM32G474xx_FLASH.ld" ""
+    CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+if(CMAKE_EXE_LINKER_FLAGS MATCHES "(^| )-T")
+    message(FATAL_ERROR "Unexpected toolchain linker script; select only ${CATCH_LINKER_SCRIPT}")
+endif()
+
 # Enable CMake support for ASM and C languages
 enable_language(C ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-T${CATCH_LINKER_SCRIPT}")
+set_property(TARGET ${CMAKE_PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS "${CATCH_LINKER_SCRIPT}")
 set(CATCH_FIRMWARE_BASENAME "${CMAKE_PROJECT_NAME}" CACHE STRING "Firmware filename without extension")
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME "${CATCH_FIRMWARE_BASENAME}")
 

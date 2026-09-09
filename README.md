@@ -52,6 +52,36 @@ IDE の個人設定、ビルド成果物、キャッシュも管理対象外で�
 Release ビルドは両方のコマンドで `Debug` を `Release` に置き換えます。
 IDE やデバッガの設定は各自の環境で作成してください。
 
+## STM32G474RB の Flash 配置
+
+本プロジェクトは実機で確認した `DBANK=1` を前提にします。128 KB品のFlashは
+Bank 1 `0x08000000–0x0800FFFF`、Bank 2 `0x08040000–0x0804FFFF` の各64 KBです。
+途中のアドレスは使用できません。CubeMX生成の連続128 KB設定では、Debug版が
+64 KBを超えると書込み時に `Operation exceeds memory limits` になります。
+
+ルートCMakeは生成ツールチェーンのリンカ指定を置き換え、Git管理する
+`linker/STM32G474RB_dualbank.ld` を使用します。CyberGearモジュールのコードと定数を
+Bank 2、起動コード・その他のコード・RAM初期値をBank 1へ配置します。
+各バンクの64 KB超過はリンク時にエラーになります。制御定数やDBANK自体は変更しません。
+CubeMX再生成後も、このスクリプトを使用するルートCMakeを維持してください。
+
+ビルド後の配置確認（実機接続不要）:
+
+```powershell
+python tests/check_flash_layout.py build/Debug/catch2026_robstride.elf build/Release/catch2026_robstride.elf
+```
+
+Bank 2の末尾は16バイト境界まで埋めます。CubeProgrammer 2.23.0の実機ログでは、
+27,896バイトの転送を13,948バイトずつに分割し、Bank 2の書込みで失敗していました。
+この分割長はG4の8バイト書込み単位に合わないため、半分に分割しても8バイト単位に
+なるよう配置しています。2026-09-09に実機で、修正後の27,904バイトが13,952バイトずつに
+分割され、両バンクの書込み、`Download verified successfully`、`main`への到達を確認しました。
+確認条件はCubeProgrammer 2.23.0、ST-LINK GDB server 7.14.0、SWD 1,000 kHz、Under Resetです。
+
+書込みにはアドレス情報を保持する **ELFまたはHEX** を使用します。
+DBANK=0の別基板へ同じイメージを流用しないでください。
+レイアウトの根拠は [STの説明とRM0440への参照](https://community.st.com/stm32cubeide-for-visual-studio-code-mcus-133/stm32g474rb-can-t-debug-program-over-64-kb-159628) を参照。
+
 ## 追跡解除について
 
 この整理では過去のコミットを変更しません。既存ファイルは `git rm --cached` で
