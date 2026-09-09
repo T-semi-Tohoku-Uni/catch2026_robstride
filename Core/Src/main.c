@@ -31,6 +31,22 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+typedef struct
+{
+  uint32_t first_received_ms;
+  uint32_t received_count;
+  int32_t trigger_baseline;
+  int32_t trigger_command;
+  uint32_t trigger_count;
+  uint32_t trigger_ms;
+  bool triggered;
+  struct
+  {
+    uint32_t received_ms;
+    int32_t command;
+    uint32_t dlc;
+  } history[64];
+} MotorInitTrace;
 
 /* USER CODE END PTD */
 
@@ -58,6 +74,8 @@
 
 #define CANID 0x200
 #define MOTOR_INIT_CANID 0x500
+#define MOTOR_INIT_COMMAND_IGNORE_MS 2000U
+#define MOTOR_INIT_COMMAND_CONFIRM_COUNT 10U
 #define CYBERGEAR_DEBUG_INTERVAL_MS 200U
 #define EL05_DEBUG_INTERVAL_MS 200U
 #define MOTOR_INIT_FEEDBACK_TIMEOUT_MS 3000U
@@ -86,6 +104,9 @@ CyberGearMotor cybergear_base;
 volatile float target_angle[4] = {0,0,2.0,0};
 static volatile bool el05_initializing = false;
 static volatile bool motor_init_requested = false;
+/* Inspect with the debugger after reproduction; UART connection is unnecessary.
+   history[(received_count - 1) % 64] is the last frame before initialization. */
+volatile MotorInitTrace motor_init_trace = {0};
 static volatile bool motors_running = false;
 static volatile bool motor_return_active = false;
 static volatile uint32_t motor_return_started_ms = 0U;
@@ -466,7 +487,7 @@ bool cybergear_homing(void)
   const uint32_t search_started_ms = HAL_GetTick();
   const GPIO_PinState initial_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
 
-  if (!cybergear_set_velocity(&cybergear_base, 1.0f))
+  if (!cybergear_set_velocity(&cybergear_base, direction))
   {
     cybergear_stop(&cybergear_base);
     return false;
@@ -481,18 +502,28 @@ bool cybergear_homing(void)
       return false;
     }
 
-    /* Reverse once if the switch has not changed after 60 degrees. */
-    if (!reversed &&
-        feedback.position_rad - start_position_rad >= CYBERGEAR_HOMING_REVERSE_ANGLE_RAD &&
-        HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == initial_state)
+    /* Check the amount moved in either encoder direction. A signed positive
+       delta alone never reaches the threshold when the angle decreases. */
+    const float moved_rad = fabsf(feedback.position_rad - start_position_rad);
+    const bool reverse_now = !reversed &&
+        moved_rad >= CYBERGEAR_HOMING_REVERSE_ANGLE_RAD &&
+        HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == initial_state;
+    if (reverse_now)
     {
-      direction = -1.0f;
+      direction = -direction;
       reversed = true;
     }
     if (!cybergear_set_velocity(&cybergear_base, direction))
     {
       cybergear_stop(&cybergear_base);
       return false;
+    }
+    if (reverse_now)
+    {
+      printf("CG home reverse: start=%.3f pos=%.3f rad\r\n",
+             (double)start_position_rad, (double)feedback.position_rad);
+      printf("CG home reverse: moved=%.3f rad cmd=%.1f rad/s\r\n",
+             (double)moved_rad, (double)direction);
     }
     HAL_Delay(10); 
   }
@@ -741,6 +772,10 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
       {
         static bool has_previous_command = false;
         static int32_t previous_command = 0;
+        static uint32_t first_command_ms = 0U;
+        static bool startup_ignore_complete = false;
+        static int32_t candidate_command = 0;
+        static uint32_t candidate_count = 0U;
         /* The first int32 is big-endian, like the other inter-board values. */
         if (rxheader.IdType == FDCAN_STANDARD_ID &&
             rxheader.RxFrameType == FDCAN_DATA_FRAME &&
@@ -748,30 +783,84 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
         {
           int32_t command = 0;
           u8_to_int(rxdata, &command, 4);
-          //printf("%d\r\n",command);
-          /* Use the first valid command as the baseline for change detection. */
-          if (!motor_return_active && has_previous_command && command != previous_command)
+          const uint32_t now_ms = HAL_GetTick();
+          if (!motor_init_requested)
           {
-            if (motors_running)
+            const uint32_t index = motor_init_trace.received_count % 64U;
+            if (motor_init_trace.received_count == 0U)
             {
-              const uint32_t interrupt_mask = __get_PRIMASK();
-              __disable_irq();
-              motor_return_active = true;
-              target_angle[0] = 0.140f;
-              target_angle[1] = -0.900f;
-              target_angle[2] = 1.98f;
-              //target_angle[3] = 0.0f;
-              motor_return_started_ms = HAL_GetTick();
-              __set_PRIMASK(interrupt_mask);
+              motor_init_trace.first_received_ms = now_ms;
+            }
+            motor_init_trace.history[index].received_ms = now_ms;
+            motor_init_trace.history[index].command = command;
+            motor_init_trace.history[index].dlc = rxheader.DataLength;
+            motor_init_trace.received_count++;
+          }
+          if (!has_previous_command)
+          {
+            first_command_ms = now_ms;
+          }
+          else if (!startup_ignore_complete &&
+                   (uint32_t)(now_ms - first_command_ms) >= MOTOR_INIT_COMMAND_IGNORE_MS)
+          {
+            startup_ignore_complete = true;
+          }
+          /* Track ignored values, but do not count them toward confirmation. */
+          if (!has_previous_command || !startup_ignore_complete || motor_return_active)
+          {
+            previous_command = command;
+            has_previous_command = true;
+            candidate_count = 0U;
+            break;
+          }
+          if (command == previous_command)
+          {
+            candidate_count = 0U;
+            break;
+          }
+          if (!motors_running)
+          {
+            /* Keep the baseline until one new value arrives ten times in a row. */
+            if (candidate_count == 0U || command != candidate_command)
+            {
+              candidate_command = command;
+              candidate_count = 1U;
             }
             else
             {
-              motor_init_requested = true;
+              candidate_count++;
+            }
+            if (candidate_count < MOTOR_INIT_COMMAND_CONFIRM_COUNT)
+            {
+              break;
+            }
+            if (!motor_init_requested)
+            {
+              motor_init_trace.trigger_baseline = previous_command;
+              motor_init_trace.trigger_command = command;
+              motor_init_trace.trigger_count = candidate_count;
+              motor_init_trace.trigger_ms = now_ms;
+              motor_init_trace.triggered = true;
             }
           }
-          /* Track ignored commands too, so they are not replayed after return. */
           previous_command = command;
-          has_previous_command = true;
+          candidate_count = 0U;
+          if (motors_running)
+          {
+            const uint32_t interrupt_mask = __get_PRIMASK();
+            __disable_irq();
+            motor_return_active = true;
+            target_angle[0] = 0.140f;
+            target_angle[1] = -0.900f;
+            target_angle[2] = 1.98f;
+            //target_angle[3] = 0.0f;
+            motor_return_started_ms = HAL_GetTick();
+            __set_PRIMASK(interrupt_mask);
+          }
+          else
+          {
+            motor_init_requested = true;
+          }
         }
         break;
       }
@@ -902,12 +991,22 @@ int main(void)
   {
     Error_Handler();
   }
-
+  printf("BOOT init-trace-v1 guard=2000ms confirm=10\r\n");
   /* CAN reception is active; defer homing, enable and cyclic commands. */
   while (!motor_init_requested)
   {
     HAL_Delay(10);
   }
+  /* The ISR freezes this trace when it requests initialization. */
+  printf("INIT confirmed=%u count=%lu rx=%lu\r\n",
+         (unsigned int)motor_init_trace.triggered,
+         (unsigned long)motor_init_trace.trigger_count,
+         (unsigned long)motor_init_trace.received_count);
+  printf("INIT value=%ld -> %ld\r\n",
+         (long)motor_init_trace.trigger_baseline, (long)motor_init_trace.trigger_command);
+  printf("INIT first=%lu trigger=%lu ms\r\n",
+         (unsigned long)motor_init_trace.first_received_ms,
+         (unsigned long)motor_init_trace.trigger_ms);
 
   /* Start monitoring with initialization, then keep monitoring in normal use. */
   const uint32_t motor_init_started_ms = HAL_GetTick();
@@ -1322,6 +1421,12 @@ void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len)
 
 int _write(int file,char *ptr,int len)
 {
+  (void)file;
+  /* Blocking UART timeouts need SysTick, which cannot preempt our CAN ISR. */
+  if (__get_IPSR() != 0U || __get_PRIMASK() != 0U)
+  {
+    return len;
+  }
   HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, 10);
   return len;
 }
@@ -1338,6 +1443,7 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
+    NVIC_SystemReset();
   }
   /* USER CODE END Error_Handler_Debug */
 }
