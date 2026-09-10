@@ -7,6 +7,7 @@
 
 typedef enum
 {
+	MIT_MODE     = 0, /* Private protocol operation mode (29-bit CAN, type 1). */
 	POSITION_PP  = 1,
 	VELOCITY     = 2,
 	CURRENT      = 3,
@@ -15,6 +16,14 @@ typedef enum
 
 typedef enum
 {
+	ROBSTRIDE_MODEL_UNSPECIFIED = 0,
+	ROBSTRIDE_MODEL_RS03,
+	ROBSTRIDE_MODEL_EL05
+} RobstrideModel;
+
+typedef enum
+{
+	MotionControlId = 0x01,
 	FeedbackId = 0x02,
 	EnableId = 0x03,
 	StopId = 0x04,
@@ -59,6 +68,7 @@ typedef struct
 
 	volatile RobstrideFeedback feedback;
 	RobstrideRunMode run_mode;
+	RobstrideModel model;
 
 	FDCAN_TxHeaderTypeDef txheader;
 } RobstrideMotor;
@@ -102,10 +112,15 @@ bool robstride_enable(RobstrideMotor *motor);
 bool robstride_stop(RobstrideMotor *motor);
 bool robstride_clear_fault(RobstrideMotor *motor);
 
+/* Reject non-finite/out-of-wire-range inputs. Torque is feedforward, not a limit. */
+bool robstride_control_mit(RobstrideMotor *motor, float position_rad,
+	float velocity_rad_s, float kp, float kd, float torque_nm);
+bool robstride_start_mit_mode(RobstrideMotor *motor);
+
 void robstride_parse_feedback(
 	uint32_t canid,
 	const uint8_t *rxdata,
-	volatile RobstrideFeedback *feedback
+	RobstrideMotor *motor
 );
 
 /* parameter raw func */

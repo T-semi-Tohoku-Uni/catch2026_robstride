@@ -3,6 +3,7 @@
 ## 1. 対象と根拠
 
 本書は`fix`ブランチの`fec81e5`を基準とし、`refactor/motor-control-spec`で整理したコードの**実装仕様**を記述する。
+RobStrideの通常運転は、その後の[MIT制御への変更](mit-control.md)を反映している。
 メーカーの保証仕様や機械の要求仕様ではなく、リポジトリから確認できる動作を対象とする。
 モーター固有の物理レンジ、ゼロ設定の永続性、faultビットの意味、実際の機構の可動範囲は外部資料・実機との照合が必要であり、ここでは確定しない。
 
@@ -12,7 +13,7 @@
 | `Core/Src/motor_app.c` | 起動順序、モーター状態、指令受付、監視、復帰、周期送信、ログ |
 | `Core/Src/cybergear_homing.c` | CyberGearの原点探索。対象モーター・通信監視・診断関数をコンテキストで受け取る |
 | `Core/Src/board_protocol.c` | 上位基板の固定長ペイロードと軸座標の変換。HALへの依存なし |
-| `Core/Inc/motor_config.h` | モーターID、配列インデックス、アプリの時間条件、PP設定 |
+| `Core/Inc/motor_config.h` | モーターID、配列インデックス、アプリの時間条件、MITゲイン |
 | `Core/Src/cybergear.c` | CyberGearの送受信、位置ADRC、制御定数 |
 | `Core/Src/robstride_app.c` | RobStrideの送受信、パラメーター書き込み、モード設定 |
 | `Core/Src/can_init.c` | CANフィルター、送信ヘッダー、受信通知の設定 |
@@ -67,9 +68,9 @@ FIFOはコールバックで空になるまで読み出す。読み出しHALエ�
 | 上位配列index | 軸 | モーターID | 内部RobStride配列index | 通常運転 |
 | --- | --- | --- | --- | --- |
 | 0 | 台座CyberGear | 0x7F | 別オブジェクト | 電流モード＋MCU上の位置ADRC |
-| 1 | 左RS03 | 4 | 1 | POSITION_PP |
-| 2 | 右RS03 | 3 | 0 | POSITION_PP |
-| 3 | EL05 | 5 | 2 | POSITION_PP |
+| 1 | 左RS03 | 4 | 1 | MIT_MODE（運控モード0） |
+| 2 | 右RS03 | 3 | 0 | MIT_MODE（運控モード0） |
+| 3 | EL05 | 5 | 2 | MIT_MODE（運控モード0） |
 
 上位基板の目標値を`q`、モーター位置を`p`とし、角度はradとする。
 
@@ -147,7 +148,7 @@ flowchart TD
     C --> D[3秒の共通フィードバック監視開始]
     D --> E[CyberGearの応答確認]
     E --> F[CyberGear原点探索・STOP]
-    F --> G[右RS03・左RS03・EL05をPPモードで起動]
+    F --> G[右RS03・左RS03・EL05をMITモードで起動]
     G --> H[CyberGear電流モード・ADRC開始]
     H --> I[TIM6開始・運転中に設定]
     I --> J[監視・復帰解除・EL05起動時再試行・ログ]
@@ -161,7 +162,7 @@ flowchart TD
 6. 応答にfaultがあればSTOPして失敗。最大3秒で個別待機を打ち切る。STOP登録失敗は次回のprobeで再試行する。
 7. CyberGearをoperation mode=0に設定、10 ms待機後Enableする。
 8. 次節の原点探索を実施し、成功時はSTOP状態にする。
-9. RobStride全3台のID・モード・送信ヘッダーを用意してから、右→左→EL05の順でPPモードを開始する。
+9. RobStride全3台のID・機種・モード・送信ヘッダーを用意してから、右→左→EL05の順でMITモードを開始する。
 10. 既知モーターのフィードバックを少なくとも1件受信済みになるまで待つ。全4台の応答を確認する条件ではない。
 11. CyberGearをSTOP→10 ms→current mode=3→10 ms→電流0→10 msと設定。ADRC状態をゼロ化し、onlineをfalseに戻し、Enableする。
 12. ADRCをactiveにしてTIM6割り込みを開始し、`motors_running=true`とする。初期化所要時間を出力する。
@@ -211,21 +212,24 @@ TIM6は1 msごとに0〜9のフェーズを巡回する。各軸への指令は1
 | フェーズ | 動作 |
 | --- | --- |
 | 0 | 台座の位置ADRC。通常は電流指令1件 |
-| 1 | 右RS03のPOSITION_REF書き込み |
-| 2 | 左RS03のPOSITION_REF書き込み |
-| 3 | EL05のPOSITION_REF書き込み。EL05初期化処理中は省略 |
+| 1 | 右RS03のMIT指令（通信タイプ1） |
+| 2 | 左RS03のMIT指令（通信タイプ1） |
+| 3 | EL05のMIT指令（通信タイプ1）。EL05初期化処理中は省略 |
 | 4〜8 | 通常のモーター指令なし |
 | 9 | カウンターを0へ戻し、上位へ`0x210`を送信 |
 
-RobStrideのPP設定は最大速度10 rad/s、加速度1 rad/s²、電流上限10 A。
-各台の起動送信順はSTOP→10 ms→run_mode=1→10 ms→Enable→10 ms→最大速度→10 ms→加速度→10 ms→電流上限。
-途中失敗ではfalseを返し、それ以降の設定を行わない。ロールバック処理はない。
+RobStrideのMIT指令は変換済み目標位置、速度0、軸別Kp/Kd、フィードフォワードトルク0。
+ゲイン初期仮値は左右RS03がKp=5/Kd=1、EL05がKp=1/Kd=0.1。
+PPの速度・加速度・電流上限設定は使わない。軌道補間や追加のトルク制限はない。
+各台の起動送信順はSTOP→10 ms→run_mode=0→10 ms→Enable→10 ms→Kp/Kdを含む5項目すべて0のMIT指令。
+途中失敗ではfalseを返し、それ以降の設定を行わない。最後のMIT指令登録失敗時はSTOPを試みる。
+MIT型制御は従来のprivate protocol上で行う。詳細は[MIT制御](mit-control.md)を参照。
 
 EL05は通常運転に入った直後に一度だけ再試行の機会を設ける。
 
 - 起動時点の受信件数から増加し、onlineかつ受信後100 ms未満のフィードバックを待つ。
 - 待機開始から3,000 ms以上なら再試行を打ち切ってログを出す。
-- 最初の新鮮な応答でmode=0、fault=0ならPP起動を1回やり直す。
+- 最初の新鮮な応答でmode=0、fault=0ならMIT起動を1回やり直す。
 - mode/faultの条件を満たさなくても機会は消費する。後の停止・異常・電源再投入で自動再起動しない。
 - 再試行中はEL05周期指令だけを抑制する。その他の軸は周期制御を続ける。
 - 再試行の登録成否を`queued=0/1`で出力する。モーター側の実行成功を確認するログではない。
@@ -300,7 +304,7 @@ Enable/STOP/パラメーター書き込みではarea2にホストID、destinatio
 
 | type | 用途 | payload |
 | --- | --- | --- |
-| 0x01 | CyberGear operation制御API | 位置・速度・Kp・Kdを各BE uint16。トルクはarea2 |
+| 0x01 | RobStride通常MIT指令、CyberGear operation制御API | 位置・速度・Kp・Kdを各BE uint16。トルクはarea2 |
 | 0x02 | フィードバック | 次項 |
 | 0x03 | Enable | 全0 |
 | 0x04 | STOP / fault clear | byte0=0 / 1、残り0 |
@@ -319,13 +323,13 @@ rawはvalue=NULLまたはサイズ>4を拒否するが、サイズ0は受け入�
 | 0x7006 | iq_ref | 電流A。CyberGear ADRCで使用 |
 | 0x700A | speed_ref | rad/s。原点探索で使用 |
 | 0x700B | limit_torque | 列挙値は存在、起動シーケンスでは未設定 |
-| 0x7016 | position_ref | rad。RobStride周期指令 |
+| 0x7016 | position_ref | rad。位置モードAPI用、通常周期では不使用 |
 | 0x7017 | limit_speed | CSP開始APIで設定 |
-| 0x7018 | limit_current | A。RobStride PP起動で10 |
-| 0x7024 | PP最大速度 | RobStrideで10 rad/s |
-| 0x7025 | PP加速度 | RobStrideで1 rad/s² |
+| 0x7018 | limit_current | A。位置・速度モードAPI用、MIT起動では不使用 |
+| 0x7024 | PP最大速度 | PP開始API用、MIT起動では不使用 |
+| 0x7025 | PP加速度 | PP開始API用、MIT起動では不使用 |
 
-RobStride modeはPOSITION_PP=1、VELOCITY=2、CURRENT=3、POSITION_CSP=5。
+RobStride modeはMIT_MODE=0、POSITION_PP=1、VELOCITY=2、CURRENT=3、POSITION_CSP=5。
 CyberGear modeはOPERATION=0、POSITION=1、SPEED=2、CURRENT=3。
 RobStrideの他モード開始APIはSTOP→mode→Enableを基本とし、送信間に10 ms待つ。速度モードはEnable後に電流上限、CSPは速度上限→電流上限を設定する。電流モード開始はEnableまでで終わる。
 
@@ -339,13 +343,13 @@ CyberGearはさらに対象IDを照合し、RobStrideはアプリがIDに対応�
 | bytes | 内容 | CyberGear換算 | RobStride換算 |
 | --- | --- | --- | --- |
 | 0–1 | 位置、BE uint16 | -12.5〜12.5 rad | -12.57〜12.57 rad |
-| 2–3 | 速度、BE uint16 | -30〜30 rad/s | -20〜20、既存フィールド名は`velocity_rps` |
-| 4–5 | トルク、BE uint16 | -12〜12 Nm | -60〜60 Nm、既存名`torqe_nm` |
+| 2–3 | 速度、BE uint16 | -30〜30 rad/s | RS03は±20、EL05は±50 rad/s。既存名`velocity_rps` |
+| 4–5 | トルク、BE uint16 | -12〜12 Nm | RS03は±60、EL05は±6 Nm。既存名`torqe_nm` |
 | 6–7 | 温度、BE uint16 | raw/10 ℃ | raw/10 ℃ |
 
 レンジ換算は`min + raw*(max-min)/65535`。
-RobStrideの速度の物理単位はフィールド名と速度指令APIの命名が一致しておらず、外部仕様との照合は未実施。
-RobStride3台には同じ換算を使用しており、EL05固有レンジの検証はない。
+RobStrideの速度フィールド名は`velocity_rps`のままだが、メーカー仕様に従ってrad/sとして換算する。
+RS03/EL05は機種別に速度・トルクを換算する。根拠資料とEL05資料内の不一致の扱いは[MIT制御](mit-control.md)を参照。
 受信時刻、online=trueを記録し、RobStrideは受信カウントも増やす。RobStride時刻フィールドは既存の`last_leceived_ms`という綴りを維持する。
 RobStrideのonlineは経過時間だけではfalseに戻らない。
 type=0x15のfault専用フレームは列挙値があるが、アプリの解析対象ではない。
@@ -358,7 +362,7 @@ type=0x15のfault専用フレームは列挙値があるが、アプリの解析
 | 1台だけ無応答、別の既知モーターから受信継続 | 共通3秒監視は発動しない |
 | CyberGear原点探索の異常 | STOPを試みて失敗を返す経路が中心。第7節の例外あり |
 | CyberGear ADRCの異常 | STOP、ADRC無効化。自動復帰なし |
-| RobStride通常指令の送信失敗 | 戻り値を上位で処理しない。次回周期で次の位置指令を送る |
+| RobStride通常指令の不正値・送信失敗 | 対象モーターへのSTOPを試みる。到達確認はない。周期指令は継続するがEnableは再送しない |
 | RobStrideのfaultフラグ | 保存するが、通常制御で共通停止しない |
 | FDCAN bus-off | 診断取得あり。独立したbus-off復旧手順なし |
 | HAL初期化等の致命的エラー | `Error_Handler`で割り込み禁止の無限ループ |
@@ -384,10 +388,10 @@ EL05再試行判定の構造体コピーは既存のまま割り込み禁止で�
 
 ## 13. 既知の制約・未実装
 
-以下は今回の構造整理で動作を変えていない項目である。
+以下は構造整理とMIT制御変更後にも残る制約である。
 
 1. `robstride_set_zero()`は仮実装コメント付きでtype=0x03・全0を送る。定義済みの`ResetPosId=0x06`を使わず、現行Enableと同じフレームになる。起動処理からは呼ばないため、ゼロ設定として利用する前に別途修正・検証が必要。
-2. RS03/EL05のソフトウェア位置範囲制限、非有限目標の拒否、各台独立の応答監視、fault時の全台停止はない。
+2. RS03/EL05のMIT指令は非有限値と通信範囲外を拒否するが、機構固有の可動範囲制限、各台独立の応答監視、fault時の全台停止はない。
 3. PC0/PC1のリミット割り込みは制御に結び付いていない。
 4. 上位指令の途絶監視、指令番号、ACK、CRC追加、到達通知はない。CAN標準機構とは別のアプリ層の機能として未実装。
 5. 返信角度には鮮度・受信有無・異常情報がなく、古い値を返信し得る。

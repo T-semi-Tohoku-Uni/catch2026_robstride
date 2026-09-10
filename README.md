@@ -5,6 +5,7 @@ STM32G474RBTxで、CyberGear 1台とRobStride系3台（右RS03・左RS03・EL05�
 
 - [詳細仕様](docs/firmware-spec.md)：通信形式、起動、原点探索、制御周期、ADRC、異常時動作、未実装事項。
 - [変更内容・検証](docs/refactoring.md)：分割方針、互換性、ビルドとテストの手順。
+- [RobStride MIT制御](docs/mit-control.md)：運控モードへの変更、機種別換算、Kp/Kdの調整と検証。
 
 Arm GNU Toolchain、CMake、NinjaをPATHに設定して実行します。
 

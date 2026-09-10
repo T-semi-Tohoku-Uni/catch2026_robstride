@@ -4,7 +4,10 @@
 #include <stdint.h>
 
 typedef struct { uint32_t unused; } FDCAN_HandleTypeDef;
-typedef struct { uint32_t unused; } FDCAN_TxHeaderTypeDef;
+typedef struct { uint32_t Identifier; } FDCAN_TxHeaderTypeDef;
+typedef enum { HAL_OK, HAL_ERROR } HAL_StatusTypeDef;
+HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *can,
+    const FDCAN_TxHeaderTypeDef *header, const uint8_t *data);
 typedef enum { GPIO_PIN_RESET, GPIO_PIN_SET } GPIO_PinState;
 
 #define limit_GPIO_Port ((void *)0)

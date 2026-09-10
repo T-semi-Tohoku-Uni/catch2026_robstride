@@ -15,7 +15,12 @@ add_executable(homing_test homing_test.c ../Core/Src/cybergear_homing.c)
 target_include_directories(homing_test PRIVATE stubs "${CMAKE_CURRENT_BINARY_DIR}/include" ../Core/Inc)
 add_test(NAME homing COMMAND homing_test)
 
-foreach(target board_protocol_test homing_test)
+configure_file(../Core/Inc/robstride_app.h include/robstride_app.h COPYONLY)
+add_executable(robstride_mit_test robstride_mit_test.c ../Core/Src/robstride_app.c)
+target_include_directories(robstride_mit_test PRIVATE stubs "${CMAKE_CURRENT_BINARY_DIR}/include")
+add_test(NAME robstride_mit COMMAND robstride_mit_test)
+
+foreach(target board_protocol_test homing_test robstride_mit_test)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /WX /utf-8)
     else()

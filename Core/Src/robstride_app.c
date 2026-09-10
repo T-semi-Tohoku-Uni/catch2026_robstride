@@ -1,8 +1,39 @@
 #include "robstride_app.h"
 
 #include "main.h"
+#include <math.h>
 
 extern FDCAN_HandleTypeDef hfdcan3;
+
+/* Private protocol wire ranges; see docs/mit-control.md for manufacturer sources.
+ * Position retains the manuals' sample-code convention of +/-12.57 rad. */
+#define ROBSTRIDE_POSITION_MAX_RAD 12.57f
+typedef struct
+{
+	float velocity_max_rad_s;
+	float torque_max_nm;
+	float kp_max;
+	float kd_max;
+} RobstrideWireLimits;
+
+static const RobstrideWireLimits rs03_limits = {20.0f, 60.0f, 5000.0f, 100.0f};
+static const RobstrideWireLimits el05_limits = {50.0f, 6.0f, 500.0f, 5.0f};
+
+static const RobstrideWireLimits *robstride_wire_limits(const RobstrideMotor *motor)
+{
+	if (motor == NULL) return NULL;
+	switch (motor->model)
+	{
+		case ROBSTRIDE_MODEL_RS03: return &rs03_limits;
+		case ROBSTRIDE_MODEL_EL05: return &el05_limits;
+		default: return NULL;
+	}
+}
+
+static bool in_range(float value, float min_value, float max_value)
+{
+	return isfinite(value) && value >= min_value && value <= max_value;
+}
 
 /* id 関連 */
 
@@ -191,13 +222,66 @@ bool robstride_clear_fault(RobstrideMotor *motor)
 	return true;
 }
 
+bool robstride_control_mit(RobstrideMotor *motor, float position_rad,
+	float velocity_rad_s, float kp, float kd, float torque_nm)
+{
+	const RobstrideWireLimits *limits = robstride_wire_limits(motor);
+	if (limits == NULL || motor->run_mode != MIT_MODE ||
+		!in_range(position_rad, -ROBSTRIDE_POSITION_MAX_RAD, ROBSTRIDE_POSITION_MAX_RAD) ||
+		!in_range(velocity_rad_s, -limits->velocity_max_rad_s, limits->velocity_max_rad_s) ||
+		!in_range(kp, 0.0f, limits->kp_max) || !in_range(kd, 0.0f, limits->kd_max) ||
+		!in_range(torque_nm, -limits->torque_max_nm, limits->torque_max_nm))
+	{
+		return false;
+	}
+
+	const uint16_t values[4] = {
+		robstride_float_to_u16(position_rad, -ROBSTRIDE_POSITION_MAX_RAD, ROBSTRIDE_POSITION_MAX_RAD),
+		robstride_float_to_u16(velocity_rad_s, -limits->velocity_max_rad_s, limits->velocity_max_rad_s),
+		robstride_float_to_u16(kp, 0.0f, limits->kp_max),
+		robstride_float_to_u16(kd, 0.0f, limits->kd_max)
+	};
+	uint8_t data[8];
+	for (uint32_t i = 0; i < 4U; ++i)
+	{
+		data[2U * i] = (uint8_t)(values[i] >> 8);
+		data[2U * i + 1U] = (uint8_t)values[i];
+	}
+	const uint16_t torque_raw = robstride_float_to_u16(
+		torque_nm, -limits->torque_max_nm, limits->torque_max_nm);
+	return send_robstride(motor,
+		robstride_make_can_id(MotionControlId, torque_raw, motor->motor_id), data);
+}
+
+bool robstride_start_mit_mode(RobstrideMotor *motor)
+{
+	if (robstride_wire_limits(motor) == NULL || !robstride_stop(motor)) return false;
+	robstride_delay();
+	if (!robstride_set_run_mode(motor, MIT_MODE)) return false;
+	robstride_delay();
+	if (!robstride_enable(motor)) return false;
+	robstride_delay();
+	/* No position stiffness until the application sends its first target. */
+	if (!robstride_control_mit(motor, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f))
+	{
+		robstride_stop(motor);
+		return false;
+	}
+	return true;
+}
+
 void robstride_parse_feedback(
 	uint32_t canid,
 	const uint8_t *rxdata,
-	volatile RobstrideFeedback *feedback
+	RobstrideMotor *motor
 )
 {
-	if (0x02 != robstride_get_communication_type(canid)) return;
+	const RobstrideWireLimits *limits = robstride_wire_limits(motor);
+	if (limits == NULL || rxdata == NULL ||
+		FeedbackId != robstride_get_communication_type(canid) ||
+		robstride_get_destination_id(canid) != motor->host_id ||
+		(uint8_t)robstride_get_area_2(canid) != motor->motor_id) return;
+	volatile RobstrideFeedback *feedback = &motor->feedback;
 
 	const uint16_t position_raw = convert_u8_u16_be(&rxdata[0]);
 	const uint16_t velocity_raw = convert_u8_u16_be(&rxdata[2]);
@@ -210,10 +294,13 @@ void robstride_parse_feedback(
 	feedback->fault_flags = (uint8_t)((data2 >> 8) & 0x3f);
 	feedback->mode = (uint8_t)((data2 >> 14) & 0x03);
 
-	feedback->position_rad = robstride_u16_to_float(position_raw, -12.57, 12.57);
-	feedback->velocity_rps = robstride_u16_to_float(velocity_raw, -20.0f, 20.0f);
-	feedback->torqe_nm = robstride_u16_to_float(torque_raw, -60.0f, 60.0f);
-	feedback->temperature_c = (float)temp_raw / 10.0;
+	feedback->position_rad = robstride_u16_to_float(position_raw,
+		-ROBSTRIDE_POSITION_MAX_RAD, ROBSTRIDE_POSITION_MAX_RAD);
+	feedback->velocity_rps = robstride_u16_to_float(velocity_raw,
+		-limits->velocity_max_rad_s, limits->velocity_max_rad_s);
+	feedback->torqe_nm = robstride_u16_to_float(torque_raw,
+		-limits->torque_max_nm, limits->torque_max_nm);
+	feedback->temperature_c = (float)temp_raw / 10.0f;
 	feedback->last_leceived_ms = HAL_GetTick();
 	feedback->online = true;
 	++feedback->received_count;
@@ -397,11 +484,13 @@ bool robstride_set_run_mode(
 {
 	const uint8_t value = (uint8_t)mode;
 
-	return robstride_write_u8(
+	if (!robstride_write_u8(
 		motor,
 		RUN_MODE,
 		value
-	);
+	)) return false;
+	motor->run_mode = mode;
+	return true;
 }
 
 bool robstride_start_current_mode(

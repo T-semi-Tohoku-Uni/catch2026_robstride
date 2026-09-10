@@ -1,7 +1,7 @@
 #ifndef MOTOR_CONFIG_H
 #define MOTOR_CONFIG_H
 
-/* Board wiring, addressing and application timing. Values retain the baseline. */
+/* Board wiring, addressing, application timing and motor tuning. */
 #define HOST_ID 0xfe
 #define RIGHT_RS03_ID 3
 #define LEFT_RS03_ID 4
@@ -19,9 +19,14 @@
 #define MOTOR_CONTROL_PHASE_COUNT 10U
 #define MOTOR_POLL_INTERVAL_MS 10U
 #define MOTOR_PROBE_INTERVAL_MS 100U
-#define MOTOR_PP_VELOCITY_RAD_S 10.0f
-#define MOTOR_PP_ACCELERATION_RAD_S2 1.0f
-#define MOTOR_PP_CURRENT_LIMIT_A 10.0f
+/* Provisional MIT gains; tune on the actual mechanism. No PP motion limits apply.
+ * The board supplies position only; velocity and feedforward torque are zero. */
+#define RIGHT_RS03_MIT_KP 5.0f
+#define RIGHT_RS03_MIT_KD 1.0f
+#define LEFT_RS03_MIT_KP 5.0f
+#define LEFT_RS03_MIT_KD 1.0f
+#define EL05_MIT_KP 1.0f
+#define EL05_MIT_KD 0.1f
 
 #define CYBERGEAR_HOMING_REVERSE_ANGLE_RAD 1.0471975512f
 #define CYBERGEAR_HOMING_SLOW_SPEED_RAD_S 0.4f

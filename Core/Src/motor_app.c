@@ -156,14 +156,14 @@ static bool robstride_init(void)
   {
     robstride_handler[i].host_id = HOST_ID;
     robstride_handler[i].motor_id = motor_ids[i];
-    robstride_handler[i].run_mode = POSITION_PP;
+    robstride_handler[i].run_mode = MIT_MODE;
+    robstride_handler[i].model = i == EL05_INDEX ? ROBSTRIDE_MODEL_EL05 : ROBSTRIDE_MODEL_RS03;
     robstride_handler[i].txheader = motor_txheader;
   }
 
   for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
   {
-    if (!robstride_start_position_pp_mode(&robstride_handler[i],
-        MOTOR_PP_VELOCITY_RAD_S, MOTOR_PP_ACCELERATION_RAD_S2, MOTOR_PP_CURRENT_LIMIT_A))
+    if (!robstride_start_mit_mode(&robstride_handler[i]))
     {
       return false;
     }
@@ -290,7 +290,7 @@ void motor_app_receive_feedback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs
     {
       if (robstride_handler[i].motor_id == motor_id)
       {
-        robstride_parse_feedback(rxheader.Identifier, rxdata, &robstride_handler[i].feedback);
+        robstride_parse_feedback(rxheader.Identifier, rxdata, &robstride_handler[i]);
         break;
       }
     }
@@ -386,18 +386,24 @@ void motor_app_control_tick(TIM_HandleTypeDef *htim)
         cybergear_control_position_adrc(&cybergear_base, target_angle[BOARD_AXIS_BASE]);
         break;
       case 1U:
-        robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX],
-            board_target_to_motor(BOARD_AXIS_RIGHT, target_angle[BOARD_AXIS_RIGHT]));
+        if (!robstride_control_mit(&robstride_handler[RIGHT_RS03_INDEX],
+            board_target_to_motor(BOARD_AXIS_RIGHT, target_angle[BOARD_AXIS_RIGHT]),
+            0.0f, RIGHT_RS03_MIT_KP, RIGHT_RS03_MIT_KD, 0.0f))
+          robstride_stop(&robstride_handler[RIGHT_RS03_INDEX]);
         break;
       case 2U:
-        robstride_set_position(&robstride_handler[LEFT_RS03_INDEX],
-            board_target_to_motor(BOARD_AXIS_LEFT, target_angle[BOARD_AXIS_LEFT]));
+        if (!robstride_control_mit(&robstride_handler[LEFT_RS03_INDEX],
+            board_target_to_motor(BOARD_AXIS_LEFT, target_angle[BOARD_AXIS_LEFT]),
+            0.0f, LEFT_RS03_MIT_KP, LEFT_RS03_MIT_KD, 0.0f))
+          robstride_stop(&robstride_handler[LEFT_RS03_INDEX]);
         break;
       case 3U:
         if (!el05_initializing)
         {
-          robstride_set_position(&robstride_handler[EL05_INDEX],
-              board_target_to_motor(BOARD_AXIS_EL05, target_angle[BOARD_AXIS_EL05]));
+          if (!robstride_control_mit(&robstride_handler[EL05_INDEX],
+              board_target_to_motor(BOARD_AXIS_EL05, target_angle[BOARD_AXIS_EL05]),
+              0.0f, EL05_MIT_KP, EL05_MIT_KD, 0.0f))
+            robstride_stop(&robstride_handler[EL05_INDEX]);
         }
         break;
       default:
@@ -513,9 +519,7 @@ void motor_app_process(void)
       if (feedback.mode == 0U && feedback.fault_flags == 0U)
       {
         el05_initializing = true;
-        const bool queued = robstride_start_position_pp_mode(
-            &robstride_handler[EL05_INDEX],
-            MOTOR_PP_VELOCITY_RAD_S, MOTOR_PP_ACCELERATION_RAD_S2, MOTOR_PP_CURRENT_LIMIT_A);
+        const bool queued = robstride_start_mit_mode(&robstride_handler[EL05_INDEX]);
         el05_initializing = false;
         printf("EL05 startup retry after feedback: queued=%u\r\n", (unsigned int)queued);
       }
