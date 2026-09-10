@@ -6,6 +6,7 @@
 #include "cybergear_homing.h"
 
 #include <stdio.h>
+#include <math.h>
 
 extern FDCAN_HandleTypeDef hfdcan1;
 extern FDCAN_HandleTypeDef hfdcan3;
@@ -17,20 +18,99 @@ static RobstrideMotor robstride_handler[ROBSTRIDE_MOTOR_COUNT] = {0};
 static CyberGearMotor cybergear_base;
 
 static volatile float target_angle[BOARD_AXIS_COUNT] = {0.0f, 0.0f, 2.0f, 0.0f};
-static volatile bool el05_initializing = false;
 static volatile bool motor_init_requested = false;
 static volatile bool motors_running = false;
 static volatile bool motor_return_active = false;
 static volatile uint32_t motor_return_started_ms = 0U;
-static volatile bool motor_init_feedback_received = false;
 static volatile uint32_t motor_last_feedback_ms = 0U;
 static volatile uint32_t motor_can_rx_count = 0U;
 static volatile uint32_t motor_can_last_rx_id = 0U;
 static volatile uint32_t motor_can_last_rx_dlc = 0U;
 static volatile uint32_t motor_can_last_rx_id_type = 0U;
-static uint32_t el05_startup_ms;
-static uint32_t el05_initial_rx_count;
-static bool el05_retry_pending;
+
+static void motor_prepare_handlers(void)
+{
+  static const uint8_t motor_ids[ROBSTRIDE_MOTOR_COUNT] = {
+    [RIGHT_RS03_INDEX] = RIGHT_RS03_ID,
+    [LEFT_RS03_INDEX] = LEFT_RS03_ID,
+    [EL05_INDEX] = EL05_ID
+  };
+  for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
+  {
+    robstride_handler[i].host_id = HOST_ID;
+    robstride_handler[i].motor_id = motor_ids[i];
+    robstride_handler[i].txheader = motor_txheader;
+  }
+  cybergear_init(&cybergear_base, &hfdcan3, CYBER_GEAR_ID, HOST_ID);
+}
+
+static bool motor_stop_all(void)
+{
+  /* Prevent cyclic commands from undoing STOP while IRQs remain available for RX. */
+  motors_running = false;
+  motor_return_active = false;
+  cybergear_base.adrc.active = false;
+  HAL_TIM_Base_Stop_IT(&htim6);
+
+  const uint32_t started_ms = HAL_GetTick();
+  uint32_t initial_rx_count[ROBSTRIDE_MOTOR_COUNT] = {0};
+  uint32_t queued_mask = 0U;
+  uint32_t stopped_mask = 0U;
+  const uint32_t all_mask = (1U << (ROBSTRIDE_MOTOR_COUNT + 1U)) - 1U;
+  do
+  {
+    /* Four motors exceed the three TX FIFO slots: pace every attempt, including
+       failed ones, and never let one missing motor skip STOP for another. */
+    uint32_t send_mask = __get_PRIMASK();
+    __disable_irq();
+    if ((queued_mask & 1U) == 0U) cybergear_base.feedback.online = false;
+    if (cybergear_stop(&cybergear_base)) queued_mask |= 1U;
+    __set_PRIMASK(send_mask);
+    HAL_Delay(MOTOR_POLL_INTERVAL_MS);
+    for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
+    {
+      send_mask = __get_PRIMASK();
+      __disable_irq();
+      if ((queued_mask & (1U << (i + 1U))) == 0U)
+      {
+        initial_rx_count[i] = robstride_handler[i].feedback.received_count;
+      }
+      if (robstride_stop(&robstride_handler[i])) queued_mask |= 1U << (i + 1U);
+      __set_PRIMASK(send_mask);
+      HAL_Delay(MOTOR_POLL_INTERVAL_MS);
+    }
+
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    const uint32_t now_ms = HAL_GetTick();
+    const CyberGearFeedback cg = cybergear_base.feedback;
+    stopped_mask = (cg.online && cg.mode == 0U &&
+        now_ms - cg.last_received_ms < ROBSTRIDE_FEEDBACK_TIMEOUT_MS) ? 1U : 0U;
+    for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
+    {
+      const RobstrideFeedback feedback = robstride_handler[i].feedback;
+      if (feedback.online && feedback.mode == 0U &&
+          feedback.received_count != initial_rx_count[i] &&
+          now_ms - feedback.last_leceived_ms < ROBSTRIDE_FEEDBACK_TIMEOUT_MS)
+      {
+        stopped_mask |= 1U << (i + 1U);
+      }
+    }
+    __set_PRIMASK(mask);
+    if ((queued_mask & stopped_mask) == all_mask) return true;
+  } while (HAL_GetTick() - started_ms < MOTOR_STOP_TIMEOUT_MS);
+
+  printf("Motor STOP unconfirmed: queued=0x%lX stopped=0x%lX\r\n",
+         (unsigned long)queued_mask, (unsigned long)stopped_mask);
+  return false;
+}
+
+static void motor_init_failed(const char *reason)
+{
+  motor_stop_all();
+  printf("Motor initialization failed: %s\r\n", reason);
+  Error_Handler();
+}
 
 static void motor_init_print_can_status(void)
 {
@@ -60,6 +140,8 @@ static void motor_init_print_can_status(void)
 
 static void motor_check_feedback(void)
 {
+  /* Startup/homing have their own deadlines and must reach STOP on failure. */
+  if (!motors_running) return;
   /* Snapshot the tick with the ISR timestamp to avoid a receive-time race. */
   const uint32_t interrupt_mask = __get_PRIMASK();
   __disable_irq();
@@ -68,19 +150,10 @@ static void motor_check_feedback(void)
   __set_PRIMASK(interrupt_mask);
   if ((uint32_t)(now_ms - last_feedback_ms) >= MOTOR_INIT_FEEDBACK_TIMEOUT_MS)
   {
+    motor_stop_all();
     motor_init_print_can_status();
     printf("No motor feedback for 3 seconds; resetting MCU\r\n");
     NVIC_SystemReset();
-  }
-}
-
-static void motor_init_wait_for_feedback(void)
-{
-  /* Also allow a response before entering an error handler or cyclic control. */
-  while (!motor_init_feedback_received)
-  {
-    motor_check_feedback();
-    HAL_Delay(MOTOR_POLL_INTERVAL_MS);
   }
 }
 
@@ -145,31 +218,165 @@ static void cybergear_debug_print(void)
          (unsigned long)(now_ms - feedback.last_received_ms));
 }
 
-static bool robstride_init(void)
+static bool robstride_init(uint32_t started_ms)
 {
-  static const uint8_t motor_ids[ROBSTRIDE_MOTOR_COUNT] = {
-    [RIGHT_RS03_INDEX] = RIGHT_RS03_ID,
-    [LEFT_RS03_INDEX] = LEFT_RS03_ID,
-    [EL05_INDEX] = EL05_ID
+  enum InitStage {
+    SEND_STOP, WAIT_STOPPED, SET_MODE, SET_VELOCITY, SET_ACCELERATION,
+    SET_CURRENT, SET_HOLD, SEND_ENABLE, WAIT_RUNNING, READY
   };
-  for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
-  {
-    robstride_handler[i].host_id = HOST_ID;
-    robstride_handler[i].motor_id = motor_ids[i];
-    robstride_handler[i].run_mode = POSITION_PP;
-    robstride_handler[i].txheader = motor_txheader;
-  }
+  struct InitState {
+    enum InitStage stage;
+    bool waiting_for_write;
+    uint32_t baseline_count;
+    uint32_t last_probe_ms;
+    uint32_t enabled_ms;
+    float hold_position;
+  } state[ROBSTRIDE_MOTOR_COUNT] = {0};
+  uint32_t index = 0U;
 
-  for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
+  while (HAL_GetTick() - started_ms < ROBSTRIDE_INIT_TIMEOUT_MS)
   {
-    if (!robstride_start_position_pp_mode(&robstride_handler[i],
-        MOTOR_PP_VELOCITY_RAD_S, MOTOR_PP_ACCELERATION_RAD_S2, MOTOR_PP_CURRENT_LIMIT_A))
+    RobstrideFeedback feedback[ROBSTRIDE_MOTOR_COUNT];
+    const uint32_t interrupt_mask = __get_PRIMASK();
+    __disable_irq();
+    const uint32_t now_ms = HAL_GetTick();
+    for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
     {
-      return false;
+      feedback[i] = robstride_handler[i].feedback;
     }
+    __set_PRIMASK(interrupt_mask);
+
+    bool all_ready = true;
+    for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
+    {
+      const bool fresh = feedback[i].online &&
+          now_ms - feedback[i].last_leceived_ms < ROBSTRIDE_FEEDBACK_TIMEOUT_MS;
+      const bool healthy = fresh && feedback[i].fault_flags == 0U &&
+          isfinite(feedback[i].position_rad);
+      if (state[i].stage == READY && (!healthy || feedback[i].mode != 2U))
+      {
+        state[i].stage = SEND_STOP;
+        state[i].waiting_for_write = false;
+      }
+      /* Wait out reported faults with STOP probes; do not clear/re-enable them. */
+      if (state[i].stage >= SET_MODE && state[i].stage < READY &&
+          (!healthy || (state[i].stage <= SEND_ENABLE && feedback[i].mode != 0U)))
+      {
+        state[i].stage = SEND_STOP;
+        state[i].waiting_for_write = false;
+      }
+      if (state[i].stage == WAIT_RUNNING && healthy && feedback[i].mode == 2U &&
+          feedback[i].received_count != state[i].baseline_count)
+      {
+        state[i].stage = READY;
+      }
+      if (state[i].stage != READY) all_ready = false;
+    }
+    if (all_ready) return true;
+
+    /* One command per poll keeps FIFO space for replies and retries. Axes make
+       progress independently, so a slow power-up does not block healthy axes. */
+    struct InitState *s = &state[index];
+    RobstrideMotor *motor = &robstride_handler[index];
+    const RobstrideFeedback f = feedback[index];
+    bool write_queued = false;
+    if (s->waiting_for_write)
+    {
+      if (f.received_count != s->baseline_count)
+      {
+        /* Type-18 writes return type-2 feedback. Do not advance merely on HAL_OK. */
+        s->waiting_for_write = false;
+        if (s->stage == SET_MODE) motor->run_mode = POSITION_PP;
+        s->stage = (enum InitStage)(s->stage + 1);
+      }
+      else if (now_ms - s->last_probe_ms >= ROBSTRIDE_INIT_PROBE_INTERVAL_MS)
+      {
+        s->waiting_for_write = false;
+      }
+      index = (index + 1U) % ROBSTRIDE_MOTOR_COUNT;
+      HAL_Delay(MOTOR_POLL_INTERVAL_MS);
+      continue;
+    }
+    switch (s->stage)
+    {
+      case SEND_STOP:
+        s->baseline_count = f.received_count;
+        if (robstride_stop(motor))
+        {
+          s->last_probe_ms = now_ms;
+          s->stage = WAIT_STOPPED;
+        }
+        break;
+      case WAIT_STOPPED:
+        if (f.online && f.received_count != s->baseline_count && f.mode == 0U &&
+            f.fault_flags == 0U && isfinite(f.position_rad) &&
+            now_ms - f.last_leceived_ms < ROBSTRIDE_FEEDBACK_TIMEOUT_MS)
+        {
+          s->hold_position = f.position_rad;
+          s->stage = SET_MODE;
+        }
+        else if (now_ms - s->last_probe_ms >= ROBSTRIDE_INIT_PROBE_INTERVAL_MS)
+        {
+          robstride_stop(motor);
+          s->last_probe_ms = now_ms;
+        }
+        break;
+      case SET_MODE:
+        write_queued = robstride_set_run_mode(motor, POSITION_PP);
+        break;
+      case SET_VELOCITY:
+        write_queued = robstride_set_pp_velocity_max(motor, MOTOR_PP_VELOCITY_RAD_S);
+        break;
+      case SET_ACCELERATION:
+        write_queued = robstride_set_pp_acceleration(motor, MOTOR_PP_ACCELERATION_RAD_S2);
+        break;
+      case SET_CURRENT:
+        write_queued = robstride_set_current_limit(motor, MOTOR_PP_CURRENT_LIMIT_A);
+        break;
+      case SET_HOLD:
+        write_queued = robstride_set_position(motor, s->hold_position);
+        break;
+      case SEND_ENABLE:
+        s->baseline_count = f.received_count;
+        if (robstride_enable(motor))
+        {
+          s->enabled_ms = now_ms;
+          s->last_probe_ms = now_ms;
+          s->stage = WAIT_RUNNING;
+        }
+        break;
+      case WAIT_RUNNING:
+        if (now_ms - s->enabled_ms >= ROBSTRIDE_INIT_RETRY_INTERVAL_MS)
+        {
+          s->stage = SEND_STOP;
+          break;
+        }
+        /* Parameter writes request feedback without another Enable. */
+        /* fall through */
+      case READY:
+        if (now_ms - s->last_probe_ms >= ROBSTRIDE_INIT_PROBE_INTERVAL_MS)
+        {
+          robstride_set_current_limit(motor, MOTOR_PP_CURRENT_LIMIT_A);
+          s->last_probe_ms = now_ms;
+        }
+        break;
+    }
+    if (write_queued)
+    {
+      s->baseline_count = f.received_count;
+      s->last_probe_ms = now_ms;
+      s->waiting_for_write = true;
+    }
+    index = (index + 1U) % ROBSTRIDE_MOTOR_COUNT;
+    HAL_Delay(MOTOR_POLL_INTERVAL_MS);
   }
 
-  return true;
+  for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
+  {
+    printf("RS startup timeout: id=%u stage=%u\r\n",
+           (unsigned int)robstride_handler[i].motor_id, (unsigned int)state[i].stage);
+  }
+  return false;
 }
 
 static bool cybergear_base_init(void)
@@ -274,7 +481,6 @@ void motor_app_receive_feedback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs
         motor_id == LEFT_RS03_ID || motor_id == EL05_ID)
     {
       motor_last_feedback_ms = HAL_GetTick();
-      motor_init_feedback_received = true;
     }
 
     if (cybergear_parse_feedback(
@@ -375,7 +581,7 @@ void motor_app_receive_command(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
 
 void motor_app_control_tick(TIM_HandleTypeDef *htim)
 {
-  if (htim == &htim6)
+  if (htim == &htim6 && motors_running)
   {
     static uint8_t control_phase = 0U;
 
@@ -394,11 +600,8 @@ void motor_app_control_tick(TIM_HandleTypeDef *htim)
             board_target_to_motor(BOARD_AXIS_LEFT, target_angle[BOARD_AXIS_LEFT]));
         break;
       case 3U:
-        if (!el05_initializing)
-        {
-          robstride_set_position(&robstride_handler[EL05_INDEX],
-              board_target_to_motor(BOARD_AXIS_EL05, target_angle[BOARD_AXIS_EL05]));
-        }
+        robstride_set_position(&robstride_handler[EL05_INDEX],
+            board_target_to_motor(BOARD_AXIS_EL05, target_angle[BOARD_AXIS_EL05]));
         break;
       default:
         break;
@@ -431,10 +634,18 @@ void motor_app_control_tick(TIM_HandleTypeDef *htim)
 
 void motor_app_start(void)
 {
-  if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK ||
-      motor_CAN_RxTxSettings_init(&motor_txheader) != HAL_OK)
+  /* Populate every STOP destination even if a later startup stage fails. */
+  motor_CAN_txheader_init(&motor_txheader);
+  motor_prepare_handlers();
+  if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK)
   {
     Error_Handler();
+    return;
+  }
+  if (motor_CAN_RxTxSettings_init(&motor_txheader) != HAL_OK)
+  {
+    motor_init_failed("CAN setup");
+    return;
   }
 
   /* CAN reception is active; defer homing, enable and cyclic commands. */
@@ -443,18 +654,16 @@ void motor_app_start(void)
     HAL_Delay(MOTOR_POLL_INTERVAL_MS);
   }
 
-  /* Start monitoring with initialization, then keep monitoring in normal use. */
   const uint32_t motor_init_started_ms = HAL_GetTick();
   const uint32_t interrupt_mask = __get_PRIMASK();
   __disable_irq();
-  motor_init_feedback_received = false;
   motor_last_feedback_ms = HAL_GetTick();
   __set_PRIMASK(interrupt_mask);
 
   if (!cybergear_base_init())
   {
-    motor_init_wait_for_feedback();
-    Error_Handler();
+    motor_init_failed("CyberGear startup");
+    return;
   }
 
   const CyberGearHomingContext homing = {
@@ -462,66 +671,67 @@ void motor_app_start(void)
   };
   if (!cybergear_homing_run(&homing))
   {
-    printf("CyberGear Homing Failed\r\n");
-    motor_init_wait_for_feedback();
-    Error_Handler();
+    motor_init_failed("CyberGear homing");
+    return;
   }
-  /* Enable motors after the blocking homing routine, just before cyclic commands. */
-  if (!robstride_init())
+  const uint32_t robstride_started_ms = HAL_GetTick();
+  while (1)
   {
-    motor_init_wait_for_feedback();
-    Error_Handler();
+    if (!robstride_init(robstride_started_ms))
+    {
+      motor_init_failed("RobStride confirmation timeout");
+      return;
+    }
+    /* Start ADRC after blocking initialization, immediately before cyclic commands. */
+    if (!cybergear_start_position_adrc(&cybergear_base))
+    {
+      motor_init_failed("CyberGear ADRC startup");
+      return;
+    }
+
+    /* ADRC startup includes UART and HAL delays. Recheck the latest RS state
+       before starting TIM6, without a receive callback between check and start. */
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    const uint32_t now_ms = HAL_GetTick();
+    bool ready = now_ms - robstride_started_ms < ROBSTRIDE_INIT_TIMEOUT_MS;
+    for (uint32_t i = 0; i < ROBSTRIDE_MOTOR_COUNT; ++i)
+    {
+      const RobstrideFeedback feedback = robstride_handler[i].feedback;
+      if (!feedback.online || feedback.fault_flags != 0U || feedback.mode != 2U ||
+          !isfinite(feedback.position_rad) ||
+          now_ms - feedback.last_leceived_ms >= ROBSTRIDE_FEEDBACK_TIMEOUT_MS)
+      {
+        ready = false;
+      }
+    }
+    HAL_StatusTypeDef timer_status = HAL_ERROR;
+    if (ready)
+    {
+      timer_status = HAL_TIM_Base_Start_IT(&htim6);
+      motors_running = timer_status == HAL_OK;
+    }
+    __set_PRIMASK(mask);
+    if (ready)
+    {
+      if (timer_status != HAL_OK)
+      {
+        motor_init_failed("control timer startup");
+        return;
+      }
+      break;
+    }
+    /* A transient loss during handoff can recover within the original budget. */
+    cybergear_stop(&cybergear_base);
   }
-  motor_init_wait_for_feedback();
-  /* Start ADRC after blocking initialization, immediately before cyclic commands. */
-  if (!cybergear_start_position_adrc(&cybergear_base))
-  {
-    printf("CyberGear ADRC start failed\r\n");
-    Error_Handler();
-  }
-  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  motors_running = true;
   printf("Motor initialization complete: %lu ms\r\n",
          (unsigned long)(HAL_GetTick() - motor_init_started_ms));
-  el05_startup_ms = HAL_GetTick();
-  el05_initial_rx_count = robstride_handler[EL05_INDEX].feedback.received_count;
-  el05_retry_pending = true;
 }
 
 void motor_app_process(void)
 {
   motor_check_feedback();
   motor_return_update();
-  /* Retry once after fresh feedback, only during startup. */
-  if (el05_retry_pending)
-  {
-    const RobstrideFeedback feedback = robstride_handler[EL05_INDEX].feedback;
-    const uint32_t now_ms = HAL_GetTick();
-    if ((uint32_t)(now_ms - el05_startup_ms) >= MOTOR_INIT_FEEDBACK_TIMEOUT_MS)
-    {
-      el05_retry_pending = false;
-      printf("EL05 startup retry expired: no fresh feedback\r\n");
-    }
-    else if (feedback.online && feedback.received_count != el05_initial_rx_count &&
-             (uint32_t)(now_ms - feedback.last_leceived_ms) < CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS)
-    {
-      /* Never re-arm after a fault, a later stop, or a motor power cycle. */
-      el05_retry_pending = false;
-      if (feedback.mode == 0U && feedback.fault_flags == 0U)
-      {
-        el05_initializing = true;
-        const bool queued = robstride_start_position_pp_mode(
-            &robstride_handler[EL05_INDEX],
-            MOTOR_PP_VELOCITY_RAD_S, MOTOR_PP_ACCELERATION_RAD_S2, MOTOR_PP_CURRENT_LIMIT_A);
-        el05_initializing = false;
-        printf("EL05 startup retry after feedback: queued=%u\r\n", (unsigned int)queued);
-      }
-    }
-  }
-
   cybergear_debug_print();
   HAL_Delay(MOTOR_POLL_INTERVAL_MS);
 }
