@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 BANKS = ((0x08000000, 0x08010000), (0x08040000, 0x08050000))
+RAM = (0x20000000, 0x20020000)
 
 
 def check(path):
@@ -18,16 +19,28 @@ def check(path):
     header = struct.unpack_from("<HHIIIIIHHHHHH", data, 16)
     machine, entry, phoff = header[1], header[3], header[4]
     phentsize, phnum = header[8], header[9]
-    if machine != 40 or phentsize < 32 or phoff + phentsize * phnum > len(data):
+    if (header[0] != 2 or machine != 40 or phoff < 52 or phentsize < 32
+            or phoff + phentsize * phnum > len(data)):
         raise ValueError("Invalid ARM ELF program headers")
+    if not entry & 1:
+        raise ValueError("Reset entry must select Thumb state")
     if not BANKS[0][0] <= (entry & ~1) < BANKS[0][1]:
         raise ValueError("Reset entry must remain in Bank 1")
     used = [0, 0]
-    starts = []
-    for i in range(phnum):
-        kind, offset, _, address, size, _, _, _ = struct.unpack_from(
-            "<IIIIIIII", data, phoff + i * phentsize)
-        if kind != 1 or size == 0:  # PT_LOAD; exclude RAM-only .bss/stack
+    programmed = []
+    vectors = None
+    entry_executable = False
+    for index in range(phnum):
+        kind, offset, virtual, address, size, memory_size, flags, _ = struct.unpack_from(
+            "<IIIIIIII", data, phoff + index * phentsize)
+        if kind != 1:
+            continue
+        if size > memory_size:
+            raise ValueError("Load segment file size exceeds memory size")
+        if memory_size and not any(
+                low <= virtual < virtual + memory_size <= high for low, high in (*BANKS, RAM)):
+            raise ValueError("Load segment outside runtime memory")
+        if size == 0:
             continue
         if offset + size > len(data):
             raise ValueError("Truncated load segment")
@@ -37,13 +50,29 @@ def check(path):
                 if bank == 1 and (address % 16 or size % 16):
                     raise ValueError("Bank 2 must be 16-byte aligned and padded for CubeProgrammer's two buffers")
                 used[bank] += size
-                starts.append(address)
+                if any(address < previous_end and previous_start < end
+                       for previous_start, previous_end in programmed):
+                    raise ValueError("Overlapping Flash load segments")
+                programmed.append((address, end))
+                if address == BANKS[0][0]:
+                    if virtual != address or size < 8:
+                        raise ValueError("Invalid reset vector segment")
+                    vectors = struct.unpack_from("<II", data, offset)
+                if flags & 1 and virtual == address and virtual <= (entry & ~1) < virtual + size - 1:
+                    entry_executable = True
                 print(f"Bank {bank + 1}: 0x{address:08X}..0x{end - 1:08X} ({size} bytes)")
                 break
         else:
             raise ValueError(f"Load segment outside Flash banks: 0x{address:08X}..0x{end - 1:08X}")
-    if 0x08000000 not in starts or not all(used):
+    if vectors is None or not all(used):
         raise ValueError("Expected vectors in Bank 1 and CyberGear code in Bank 2")
+    stack, reset = vectors
+    if not RAM[0] < stack <= RAM[1] or stack % 8:
+        raise ValueError("Initial stack must be 8-byte aligned in RAM")
+    if reset != entry:
+        raise ValueError("Reset vector must match the ELF Thumb entry")
+    if not entry_executable:
+        raise ValueError("Reset entry has no executable Flash bytes")
     print(f"PASS {path}: no programmed bytes in the Flash gap")
 
 

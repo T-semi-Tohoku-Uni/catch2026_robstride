@@ -1,7 +1,9 @@
 # CyberGear単体試験
 
-現在の既定ビルドは `Core/Inc/app_mode.h` の
-`APP_CYBERGEAR_STANDALONE_TEST=1` により単体試験になります。
+現在の既定ビルドは通常4軸制御です。
+CMakeの `-DAPP_CYBERGEAR_STANDALONE_TEST=ON` により単体試験を選択します。
+停止距離の予測保護モデルはユーザー指示によりいったん省略しました。
+以下は想定する動作・ログです。今回の検証は実機を使っていません。
 
 ## 書き込むファイル
 
@@ -16,9 +18,9 @@ CubeProgrammerでこのELFを選び、「プログラミング検証」と
 実行を選ばない場合は、書き込み後に基板をリセットします。
 外部基板のCAN開始指令やデバッガ操作は不要です。
 
-この版は位置制御の電流上限を3 Aに変更したものです。ホストテストでは、3 A設定で
-停止距離保護 `fault=16` が原点付近でも作動する条件を再現しています。
-電流上限の変更だけでは、この停止原因は解消しません。実機の往復完了は未確認です。
+この試験は位置制御の電流上限を3 Aに変更します。過去版では運転後に
+停止距離保護 `fault=16` が作動しました。現行版はその予測計算・判定と起動前の整合性検査を省略しています。
+実機の往復完了は未確認です。
 
 ## 起動後の動作
 
@@ -79,17 +81,16 @@ CG TEST: new target=-0.5236 rad
 
 往復の振幅・待機時間・試験用上限は `Core/Inc/cybergear_test_motion.h` にあります。
 位置制御開始前に電流上限と軌道用の加減速電流予算を3 Aに設定し、補償電流上限も整合させます。
-`fault=16` は `CG_FAULT_STOP_MARGIN` です。制動電流、5 A/sの電流変化制限、
-外向き加速度16 rad/s²、保証制動加速度1.5 rad/s²などから停止距離を見積もります。
-3 A設定では原点付近でも位置限界までの距離を超える条件があり、ホストテストで再現しています。
-停止距離の保護処理とこれらの加速度・電流変化制限は変更していません。
-既存の制動・加速度の設定値が実機で成立することを、この変更で検証したわけではありません。
+`fault=16` の `CG_FAULT_STOP_MARGIN` は過去ログとの番号互換のため宣言を残していますが、
+現在の実行経路では発報しません。停止距離予測専用の保証減速度・外向き加速度・輸送遅延・停止余裕は削除しました。
+角度・速度・電流・温度・通信・追従・拘束の保護、STOP処理、ADRC・軌道・慣性モデルは維持します。
+軌道用の加減速制約と電流変化率制限も使用します。実機での許容値と停止挙動は未検証です。
 
 CubeMX生成済みファイルとCMake・Ninja・Arm GCCがPATHにある環境で実行します。
 
 ```powershell
-cmake -S . -B build/cybergear-swing30-3a -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake' '-DCATCH_FIRMWARE_BASENAME=cybergear_swing30_v4_3a'
+cmake -S . -B build/cybergear-swing30-3a -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake' '-DCATCH_FIRMWARE_BASENAME=cybergear_swing30_v4_3a' '-DAPP_CYBERGEAR_STANDALONE_TEST=ON'
 cmake --build build/cybergear-swing30-3a
 ```
 
-通常の全軸動作へ戻す場合は `APP_CYBERGEAR_STANDALONE_TEST` を0に変更し、再ビルドします。
+通常の全軸動作へ戻す場合はCMakeを `-DAPP_CYBERGEAR_STANDALONE_TEST=OFF` で再構成し、再ビルドします。

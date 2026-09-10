@@ -57,6 +57,8 @@ rules.ninja
 *.cyclo
 
 # Temporary files
+__pycache__/
+*.pyc
 tmp/
 *.tmp
 *.bak

@@ -49,3 +49,49 @@ add_test(NAME cybergear_real_tim6_scheduler
 add_test(NAME cybergear_real_fdcan3_dispatch
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_rx_dispatch.py"
         "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
+
+add_executable(board_protocol_test board_protocol_test.c ../Core/Src/board_protocol.c)
+target_include_directories(board_protocol_test PRIVATE ../Core/Inc)
+add_test(NAME board_protocol COMMAND board_protocol_test)
+
+add_executable(robstride_startup_test robstride_startup_test.c
+    ../Core/Src/robstride_app.c ../Core/Src/robstride_startup.c)
+target_include_directories(robstride_startup_test PRIVATE stubs ../Core/Inc)
+target_compile_definitions(robstride_startup_test PRIVATE APP_CYBERGEAR_STANDALONE_TEST=0)
+if(MSVC)
+    target_compile_options(robstride_startup_test PRIVATE /UNDEBUG
+        "/FI${CMAKE_CURRENT_SOURCE_DIR}/robstride_startup_hal.h")
+else()
+    target_compile_options(robstride_startup_test PRIVATE
+        -include "${CMAKE_CURRENT_SOURCE_DIR}/robstride_startup_hal.h")
+endif()
+foreach(host_target board_protocol_test robstride_startup_test robstride_tx_test)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${host_target} PRIVATE
+            -Wall -Wextra -Wpedantic -Werror -fno-fast-math -UNDEBUG)
+        target_link_libraries(${host_target} PRIVATE m)
+        if(CYBERGEAR_SANITIZERS)
+            target_compile_options(${host_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(${host_target} PRIVATE -fsanitize=address,undefined)
+        endif()
+    endif()
+endforeach()
+foreach(startup_scenario normal delayed-power transient-tx missing-feedback wrong-mode
+        wrong-id stale-feedback stale-ready late-fault fault tick-rollover silent-config-loss
+        ignored-enable temporary-fault persistent-tx invalid-position lost-hold hold-shift
+        handoff-keepalive)
+    add_test(NAME robstride_startup_${startup_scenario} COMMAND robstride_startup_test ${startup_scenario})
+endforeach()
+add_test(NAME firmware_flash_layout_checker
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_flash_layout.py")
+add_test(NAME motor_startup_integration
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_motor_startup.py"
+        "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
+add_test(NAME board_command_integration
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_board_commands.py"
+        "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
+if(CYBERGEAR_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    set_tests_properties(cybergear_standalone_commands cybergear_real_tim6_scheduler
+        cybergear_real_fdcan3_dispatch motor_startup_integration board_command_integration
+        PROPERTIES ENVIRONMENT "CATCH_HOST_SANITIZERS=1")
+endif()

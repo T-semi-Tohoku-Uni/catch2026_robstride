@@ -3,14 +3,17 @@
 設定入口：[Core/Inc/cybergear_config.h](../Core/Inc/cybergear_config.h)。
 設定の組立て：[Core/Src/cybergear.c](../Core/Src/cybergear.c) の `cybergear_config_defaults()`。
 
+停止距離の予測保護モデルはユーザー指示によりいったん省略しており、専用パラメーターの設定は不要。
+角度・速度・電流・温度・通信・追従・拘束の保護とSTOP処理、ADRC・軌道・慣性モデルは維持する。
+
 **1. 初期モードを維持する**
 
-実機確認までは `CYBERGEAR_HARDWARE_CONFIRMED=0`。
+実機未確認の構成では `CYBERGEAR_HARDWARE_CONFIRMED=0` にして準備する。現在の格納値は1。
 `CYBERGEAR_USE_200_HZ=0`、`CYBERGEAR_COMPARE_OPERATION_MODE=0` のまま、100 Hz・電流モードで準備する。
 
 **2. 機械固有の値を埋める**
 
-次の `NAN` を、図面・定格・実測記録で確定した値に置き換える。未確認の項目は残す。
+次の機械値を、図面・定格・実測記録と照合して設定する。未確認の項目は `NAN` にする。
 表では共通の接頭辞 `CYBERGEAR_` を省略。
 
 | 順番 | 設定項目 | 内容・単位 |
@@ -20,8 +23,6 @@
 | ② 許容値 | `CURRENT_LIMIT_A` | 許容する電流の絶対上限 [A]。旧10 Aを定格とみなさない |
 | | `SPEED_TRIP_RAD_S` / `TEMPERATURE_TRIP_C` | 速度 [rad/s]・温度 [℃] の停止しきい値 |
 | ③ 入力ゲイン | `B0_FIXED` / `B0_MIN` / `B0_MAX` | 電流に対する加速度の代表値・全姿勢/荷物の下限・上限 [rad/s²/A] |
-| ④ 停止余裕 | `BRAKE_GUARANTEED_RAD_S2` | 駆動が有効なときに保証できる減速度 [rad/s²] |
-| | `OUTWARD_ACCEL_RAD_S2` / `STOP_MARGIN_RAD` | 遅延中に残り得る外向き加速度 [rad/s²]・位置の余裕 [rad] |
 
 **3. 値の組合せを確認する**
 
@@ -42,6 +43,7 @@ SPEED_TRIP_RAD_S > TRAJECTORY_SPEED_RAD_S
 初回は制御帯域 `wc=4`、減衰比 `zeta=2`、観測帯域 `wo=10` を維持する。
 軌道の既定値 V=0.4 rad/s、A/B=1 rad/s²、J=5 rad/s³は開始候補であり、機体の許容値に合わせて下げる。
 比較PD用の `operation_kp/kd/torque_limit` は電流モードでは `NAN` のままでよい。
+停止距離式による起動拒否は行わない。軌道用の減速度・減速電流予算と電流変化率制限は引き続き使う。
 
 **4. 実機なしで確認する**
 

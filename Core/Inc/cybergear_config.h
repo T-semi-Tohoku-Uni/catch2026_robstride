@@ -32,11 +32,6 @@
 #define CYBERGEAR_TRAJECTORY_ACCEL_RAD_S2 1.0f
 #define CYBERGEAR_TRAJECTORY_BRAKE_RAD_S2 1.0f
 #define CYBERGEAR_TRAJECTORY_JERK_RAD_S3  5.0f
-/* 制動の確認値。遅延中の外向き加速度と、その後保証できる減速度 [rad/s²]。
- * 停止余裕は delay + 電流符号反転時間も含めて評価。CAN断時の停止保証ではない。 */
-#define CYBERGEAR_BRAKE_GUARANTEED_RAD_S2 1.5
-#define CYBERGEAR_OUTWARD_ACCEL_RAD_S2   16.0
-#define CYBERGEAR_STOP_MARGIN_RAD        0.10
 /* 0=100 Hz（初期値）、1=200 Hz。TIM6/他軸の周期は変えない。
  * 200 Hz は受信遅延分布/最悪ISR時間を実機確認後に使用する。 */
 #ifndef CYBERGEAR_USE_200_HZ

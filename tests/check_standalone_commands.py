@@ -8,11 +8,16 @@ from compile_host import compile_host
 
 PREFIX = r'''
 #include <assert.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include "stm32g4xx_hal.h"
 #include "app_mode.h"
+#include "cybergear.h"
+#include "board_protocol.h"
+#define __MAIN_H
+#include "robstride_startup.h"
 #define FDCAN_IT_RX_FIFO1_NEW_MESSAGE 1U
 #define FDCAN_RX_FIFO1 1U
 #define FDCAN_DLC_BYTES_4 0x00040000U
@@ -23,12 +28,15 @@ PREFIX = r'''
 int can1_instance;
 #define FDCAN1 ((void *)&can1_instance)
 bool motor_return_active, motors_running, motor_init_requested;
+CyberGearMotor cybergear_base;
+RobstrideMotor robstride_handler[3];
 uint32_t motor_return_started_ms, motor_last_feedback_ms;
 float target_angle[4] = {1, 2, 3, 4};
-unsigned int next_frame, resets;
+unsigned int next_frame, resets, failures;
 uint32_t HAL_GetTick(void) { return 100000U; }
 void NVIC_SystemReset(void) { ++resets; }
 void motor_init_print_can_status(void) {}
+void motor_init_failed(const char *reason) { assert(reason != NULL); ++failures; }
 uint32_t HAL_FDCAN_GetRxFifoFillLevel(FDCAN_HandleTypeDef *h, uint32_t fifo)
 { (void)h; assert(fifo == FDCAN_RX_FIFO1); return 3U - next_frame; }
 HAL_StatusTypeDef HAL_FDCAN_GetRxMessage(FDCAN_HandleTypeDef *h, uint32_t fifo,
@@ -42,10 +50,6 @@ HAL_StatusTypeDef HAL_FDCAN_GetRxMessage(FDCAN_HandleTypeDef *h, uint32_t fifo,
     data[3] = (uint8_t)next_frame++; /* A changing start/return command. */
     return HAL_OK;
 }
-void u8_to_int(uint8_t *data, int32_t *value, uint32_t len)
-{ (void)len; *value = data[3]; }
-void u8_to_float(uint8_t *data, float *values, uint32_t len)
-{ (void)data; (void)len; for (unsigned int i = 0; i < 4U; ++i) values[i] = 99.0f; }
 '''
 SUFFIX = r'''
 int main(void)
@@ -60,7 +64,7 @@ int main(void)
         for (unsigned int i = 0; i < 4U; ++i) assert(target_angle[i] == (float)(i + 1U));
     }
     motor_check_feedback(); /* No feedback for 100 s must not reboot/re-home. */
-    assert(resets == 0U);
+    assert(resets == 0U && failures == 0U);
     puts("Standalone: external start/return/targets ignored; no feedback reboot.");
     return 0;
 }
@@ -71,8 +75,9 @@ def main():
     compiler, repo_arg, output_arg = sys.argv[1:]
     repo, output = Path(repo_arg).resolve(), Path(output_arg).resolve()
     source = (repo / "Core/Src/main.c").read_text(encoding="utf-8")
+    protocol = (repo / "Core/Src/board_protocol.c").read_text(encoding="utf-8")
     generated = output / "standalone_commands_generated.c"
-    generated.write_text(PREFIX + callback(source, "HAL_FDCAN_RxFifo1Callback")
+    generated.write_text(PREFIX + protocol + callback(source, "HAL_FDCAN_RxFifo1Callback")
                          + callback(source, "motor_check_feedback") + SUFFIX, encoding="utf-8")
     binary = output / "standalone_commands.exe"
     compile_host(compiler, repo, generated, binary, ["APP_CYBERGEAR_STANDALONE_TEST=1"])

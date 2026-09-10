@@ -25,6 +25,7 @@ PREFIX = r'''
 #include <stdio.h>
 #include "cybergear.h"
 #include "app_mode.h"
+#include "board_protocol.h"
 #define FDCAN_DLC_BYTES_16 0x000a0000U
 #define RIGHT_RS03_INDEX 0
 #define LEFT_RS03_INDEX 1
@@ -36,7 +37,7 @@ static CyberGearMotor cybergear_base;
 static MockRobstride robstride_handler[3];
 static FDCAN_HandleTypeDef hfdcan1;
 static FDCAN_TxHeaderTypeDef inter_board_txheader;
-static bool el05_initializing;
+static bool motors_running;
 static float target_angle[4] = {0.3f, 0.5f, -0.1f, 0.8f};
 static unsigned int cg_calls, rs_calls[3], board_calls;
 static float cg_target, rs_target[3], reported[4];
@@ -55,19 +56,13 @@ static bool robstride_set_position(MockRobstride *m, float target)
     rs_target[index] = target;
     return true;
 }
-static void float_to_u8(float *values, uint8_t *bytes, uint32_t count)
-{
-    (void)bytes;
-    assert(count == 4U);
-    for (unsigned int i = 0; i < count; ++i) reported[i] = values[i];
-}
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *m,
     FDCAN_TxHeaderTypeDef *header, uint8_t *data)
 {
-    (void)data;
     assert(m == &hfdcan1);
     assert(header->Identifier == 0x210U);
     assert(header->DataLength == FDCAN_DLC_BYTES_16);
+    board_decode_angles(data, reported);
     ++board_calls;
     return HAL_OK;
 }
@@ -82,6 +77,13 @@ int main(void)
     robstride_handler[2].feedback.position_rad = -0.6f;
     for (unsigned int i = 0; i < 1000U; ++i) HAL_TIM_PeriodElapsedCallback(&other_timer);
     assert(cg_calls == 0U && board_calls == 0U);
+    for (unsigned int i = 0; i < 1000U; ++i) HAL_TIM_PeriodElapsedCallback(&htim6);
+    assert(cg_calls == (APP_CYBERGEAR_STANDALONE_TEST ?
+        (CYBERGEAR_USE_200_HZ ? 200U : 100U) : 0U));
+    assert(rs_calls[0] == 0U && rs_calls[1] == 0U && rs_calls[2] == 0U);
+    assert(board_calls == 0U);
+    cg_calls = 0U;
+    motors_running = true;
     for (unsigned int i = 0; i < 1000U; ++i) HAL_TIM_PeriodElapsedCallback(&htim6);
     assert(cg_calls == (CYBERGEAR_USE_200_HZ ? 200U : 100U));
     for (unsigned int i = 0; i < 3U; ++i)
@@ -98,17 +100,25 @@ int main(void)
     assert(fabsf(reported[3] + 2.363f) < 1e-6f);
     }
     cybergear_base.state = CG_STATE_FAULT;
-    el05_initializing = true;
     for (unsigned int i = 0; i < 1000U; ++i) HAL_TIM_PeriodElapsedCallback(&htim6);
     assert(cg_calls == (CYBERGEAR_USE_200_HZ ? 400U : 200U));
     if (APP_CYBERGEAR_STANDALONE_TEST) {
         assert(rs_calls[0] == 0U && rs_calls[1] == 0U && rs_calls[2] == 0U);
         assert(board_calls == 0U);
     } else {
-        assert(rs_calls[0] == 200U && rs_calls[1] == 200U && rs_calls[2] == 100U);
+        assert(rs_calls[0] == 200U && rs_calls[1] == 200U && rs_calls[2] == 200U);
         assert(board_calls == 200U);
     }
-    puts("Real TIM6 callback: cadence, offsets, and fault scheduling passed.");
+    motors_running = false;
+    cg_calls = 0U;
+    board_calls = 0U;
+    for (unsigned int index = 0U; index < 3U; ++index) rs_calls[index] = 0U;
+    for (unsigned int index = 0U; index < 1000U; ++index) HAL_TIM_PeriodElapsedCallback(&htim6);
+    assert(cg_calls == (APP_CYBERGEAR_STANDALONE_TEST ?
+        (CYBERGEAR_USE_200_HZ ? 200U : 100U) : 0U));
+    assert(rs_calls[0] == 0U && rs_calls[1] == 0U && rs_calls[2] == 0U);
+    assert(board_calls == 0U);
+    puts("Real TIM6 callback: startup/stop gates, cadence, offsets, and isolation passed.");
     return 0;
 }
 '''
@@ -119,7 +129,8 @@ def main() -> None:
     repo, output = Path(repo_arg).resolve(), Path(output_arg).resolve()
     source = callback((repo / "Core/Src/main.c").read_text(encoding="utf-8"))
     generated = output / "scheduler_test_generated.c"
-    generated.write_text(PREFIX + source + SUFFIX, encoding="utf-8")
+    protocol = (repo / "Core/Src/board_protocol.c").read_text(encoding="utf-8")
+    generated.write_text(PREFIX + protocol + source + SUFFIX, encoding="utf-8")
     for high_rate in (0, 1):
         for standalone in (0, 1):
             binary = output / f"scheduler_{high_rate}_{standalone}.exe"

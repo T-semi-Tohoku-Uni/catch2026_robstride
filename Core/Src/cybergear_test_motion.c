@@ -6,8 +6,6 @@ bool cybergear_test_configure(CyberGearMotor *motor)
 {
     if (motor == NULL) return false;
     CyberGearConfig config = motor->config;
-    /* Reduce drive current without weakening the existing stopping-distance,
-     * feedback, temperature, saturation, or hard-position protection. */
     const float current = fminf(config.controller.current_limit_a, CG_TEST_CURRENT_LIMIT_A);
     config.controller.current_limit_a = current;
     config.controller.disturbance_limit_a = fminf(config.controller.disturbance_limit_a, 0.5f * current);

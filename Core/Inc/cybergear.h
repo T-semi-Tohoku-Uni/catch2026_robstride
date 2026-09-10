@@ -95,10 +95,6 @@ typedef struct {
     uint16_t stop_max_attempts;       /* STOPの最大投入試行回数。失敗も回数に含む。 */
     uint32_t planner_lead_ms;         /* mainで将来状態から計画する先行時間 [ms]。周期の整数倍。 */
     uint32_t planner_timeout_ms;      /* 新目標の計画が有効にならない最長時間 [ms]。 */
-    float brake_guaranteed_rad_s2;    /* 制動時に保証できる減速度 [rad/s²]。未同定なら起動不可。 */
-    float outward_accel_rad_s2;       /* 遅延中に残り得る外向き加速度 [rad/s²]。 */
-    uint32_t transport_delay_ms;      /* 検出＋通信の保守遅延 [ms]。電流反転遅延は別途自動加算。 */
-    float stop_margin_rad;            /* モデル誤差・位置測定誤差の停止余裕 [rad]。 */
     float operation_kp, operation_kd; /* 比較用の内蔵PD。Kp [Nm/rad]、Kd [Nm s/rad]。未設定NAN。 */
     float operation_torque_limit_nm; /* 比較用トルク上限レジスタ [Nm]。FW適用確認が必要。 */
 } CyberGearConfig;

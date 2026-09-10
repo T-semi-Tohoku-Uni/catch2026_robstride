@@ -444,7 +444,6 @@ bool cybergear_parse_feedback(
 }
 
 static bool positive(float x) { return isfinite(x) && x > 0.0f; }
-static bool nonnegative(float x) { return isfinite(x) && x >= 0.0f; }
 static uint32_t lock_state(void) { uint32_t mask = __get_PRIMASK(); __disable_irq(); return mask; }
 static bool time_reached(uint32_t now, uint32_t when) { return (int32_t)(now - when) >= 0; }
 
@@ -488,10 +487,6 @@ void cybergear_config_defaults(CyberGearConfig *c)
     c->stop_max_attempts = 20U;
     c->planner_lead_ms = 50U;
     c->planner_timeout_ms = 500U;
-    c->brake_guaranteed_rad_s2 = CYBERGEAR_BRAKE_GUARANTEED_RAD_S2;
-    c->outward_accel_rad_s2 = CYBERGEAR_OUTWARD_ACCEL_RAD_S2;
-    c->stop_margin_rad = CYBERGEAR_STOP_MARGIN_RAD;
-    c->transport_delay_ms = 100U;
     c->operation_kp = NAN;
     c->operation_kd = NAN;
     c->operation_torque_limit_nm = NAN;
@@ -530,12 +525,11 @@ bool cybergear_config_valid(const CyberGearConfig *c)
         positive(c->tracking_error_rad) && positive(c->stall_current_a) &&
         c->stall_current_a <= c->controller.current_limit_a && positive(c->stall_progress_rad) &&
         positive(c->stationary_speed_rad_s) && c->stationary_speed_rad_s < c->speed_trip_rad_s &&
-        positive(c->brake_guaranteed_rad_s2) && nonnegative(c->outward_accel_rad_s2) &&
-        positive(c->stop_margin_rad) && c->transport_delay_ms >= c->controller.feedback_timeout_ms &&
-        c->transport_delay_ms < 10000U && c->tracking_timeout_ms > 0U && c->tracking_timeout_ms < 60000U &&
+        c->tracking_timeout_ms > 0U && c->tracking_timeout_ms < 60000U &&
         c->saturation_timeout_ms > 0U && c->saturation_timeout_ms < 60000U &&
         c->stall_timeout_ms > 0U && c->stall_timeout_ms < 60000U &&
-        c->stationary_dwell_ms > 0U && c->startup_timeout_ms > c->stationary_dwell_ms * 2U &&
+        c->stationary_dwell_ms > 0U && c->stationary_dwell_ms < 30000U &&
+        c->startup_timeout_ms > c->stationary_dwell_ms * 2U &&
         c->startup_timeout_ms < 60000U && c->command_retry_ms >= c->controller.period_ms &&
         c->stop_timeout_ms >= c->command_retry_ms && c->stop_timeout_ms < 60000U &&
         c->stop_max_attempts > 0U && c->stop_max_attempts <= 100U &&
@@ -547,7 +541,8 @@ bool cybergear_config_valid(const CyberGearConfig *c)
         c->dynamics.acceleration_current_a <= c->controller.current_limit_a &&
         c->dynamics.braking_current_a <= c->controller.current_limit_a &&
         c->dynamics.reserve_current_a >= c->controller.disturbance_limit_a &&
-        c->dynamics.current_slew_a_s <= fminf(c->controller.current_rise_a_s, c->controller.current_fall_a_s);
+        c->dynamics.current_slew_a_s <= fminf(c->controller.current_rise_a_s,
+            c->controller.current_fall_a_s);
 }
 
 bool cybergear_configure(CyberGearMotor *m, const CyberGearConfig *c)
@@ -916,23 +911,6 @@ static CyberGearFault running_protection(CyberGearMotor *m, uint32_t now)
             m->stall_since_ms = now; m->stall_start_rad = m->feedback.position_rad;
         } else if (now - m->stall_since_ms >= c->stall_timeout_ms) return CG_FAULT_STALL;
     } else m->stall_active = false;
-    /* Conservative distance to HARD boundary, including existing current reversal.
-     * This is an active-drive feasibility monitor, not a guarantee after STOP/CAN loss. */
-    const float velocity = m->feedback.velocity_rad_s;
-    if (fabsf(velocity) > c->stationary_speed_rad_s) {
-        const float slew = fminf(c->controller.current_rise_a_s, c->controller.current_fall_a_s);
-        const float previous_current = m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT ?
-            fabsf(m->controller.last_queued_current_a) : c->controller.current_limit_a;
-        const float reversal = (previous_current + c->dynamics.braking_current_a) / slew;
-        const float delay = (float)c->transport_delay_ms * 0.001f + reversal;
-        const float speed = fabsf(velocity);
-        const float after = speed + c->outward_accel_rad_s2 * delay;
-        const float margin = speed * delay + 0.5f * c->outward_accel_rad_s2 * delay * delay +
-            after * after / (2.0f * c->brake_guaranteed_rad_s2) + c->stop_margin_rad;
-        const float available = velocity > 0.0f ? c->hard_max_rad - m->feedback.position_rad :
-            m->feedback.position_rad - c->hard_min_rad;
-        if (!isfinite(margin) || margin >= available) return CG_FAULT_STOP_MARGIN;
-    }
     return CG_FAULT_NONE;
 }
 

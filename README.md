@@ -2,15 +2,19 @@
 
 STM32G474RBTx 向けのモーター制御ファームウェアです。
 
-現在の既定ビルドは **CyberGear単体試験** です。起動後にCyberGearだけを原点探索し、
-原点から±30度を往復し、各端で1秒待ちます。RobStrideへの送信は無効です。
-書き込み先と確認方法は[CyberGear単体試験](docs/08_CyberGear単体試験.md)を参照してください。
+既定ビルドは **通常の4軸制御** です。CAN ID `0x500` の開始指令が0→1に変化すると、
+CyberGearを原点探索し、RobStride全3軸とCyberGearの起動確認後に周期制御を開始します。
+CyberGear単体試験はCMakeの `-DAPP_CYBERGEAR_STANDALONE_TEST=ON` で明示的に選びます。
+[統合修正と空試験](docs/09_統合修正と空試験.md)にブランチの取込み内容と検証手順をまとめています。
 
 CyberGearの設定は[簡易設定手順](docs/07_CyberGear簡易設定手順.md)から始めてください。
 改修内容、実機必須パラメーター、詳しい調整方法は
 [実装・調整説明](docs/05_CyberGear実装と調整.md)を参照してください。
-機械可動域・許容電流・入力ゲインなどが未設定の既定値では、CyberGearは
-ホーミング開始前に起動を拒否します。実機なしの検証は
+ユーザー指示により、停止距離の予測保護モデル全体をいったん省略しました。
+停止距離の計算・運転中の判定・起動時の整合性検査・専用パラメーターを削除しています。
+角度・速度・電流・温度・通信・追従・拘束の保護とSTOP処理、ADRC・軌道・慣性モデルは維持します。
+通常6 A・単体3 Aを停止距離の式で起動拒否する条件はありません。
+[現在の設定条件](docs/controller_parameters.md)を参照してください。実機なしの検証は
 `powershell -ExecutionPolicy Bypass -File tests/run_host_tests.ps1` で実行できます。
 
 ## Git で管理するもの
@@ -21,7 +25,7 @@ CyberGearの設定は[簡易設定手順](docs/07_CyberGear簡易設定手順.md
 - ルートの `CMakeLists.txt`：独自ソースの追加と浮動小数点 `printf` のリンク設定。
 - `.gitignore` とこの README。
 
-`Drivers/`、`cmake/`、`CMakePresets.json`、起動コード、リンカスクリプト、
+`Drivers/`、`cmake/`、`CMakePresets.json`、起動コード、生成リンカスクリプト、
 独自実装のない生成ファイルは `.gitignore` に個別指定しています。
 IDE の個人設定、ビルド成果物、キャッシュも管理対象外です。
 生成ファイルに必要な変更は `.ioc` に反映し、独自実装は追跡中のソースに置いてください。
