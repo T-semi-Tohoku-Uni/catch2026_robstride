@@ -504,6 +504,242 @@ static void configured_motion_protection_test(void)
     }
 }
 
+static void start_saturation_fixture(CyberGearMotor *motor, bool amplitude)
+{
+    configure(motor);
+    CyberGearConfig config = motor->config;
+    config.controller.bandwidth_rad_s = amplitude ? 100.0f : 10.0f;
+    config.controller.damping_ratio = 0.01f;
+    config.controller.observer_rad_s = 100.0f;
+    config.controller.compensation_gain = 0.0f;
+    config.controller.current_rise_a_s = amplitude ? 1000.0f : 0.1f;
+    config.controller.current_fall_a_s = config.controller.current_rise_a_s;
+    config.dynamics.current_slew_a_s = config.controller.current_rise_a_s;
+    config.dynamics.reserve_slew_a_s = 0.5f * config.dynamics.current_slew_a_s;
+    assert(cybergear_configure(motor, &config));
+    start_configured(motor, CYBERGEAR_RUN_MODE_CURRENT);
+}
+
+static void saturation_tick(CyberGearMotor *motor, float position_rad)
+{
+    tick_ms += motor->config.controller.period_ms;
+    feedback(motor, 2U, position_rad, 0.0f, 25.0f, 0U);
+    (void)cybergear_control_position_adrc(motor, 0.0f);
+    cybergear_service(motor);
+    assert(motor->latest_log.amp_limited == motor->output.amplitude_limited);
+    assert(motor->latest_log.slew_limited == motor->output.slew_limited);
+}
+
+static void sustained_saturation_protection_test(void)
+{
+    for (unsigned int variant = 0U; variant < 3U; ++variant) {
+        for (int direction = -1; direction <= 1; direction += 2) {
+            CyberGearMotor motor;
+            clear_mock(1000U);
+            const bool amplitude = variant == 0U;
+            start_saturation_fixture(&motor, amplitude);
+            const uint32_t saturation_start_ms = tick_ms + motor.config.controller.period_ms;
+            for (uint32_t step = 0U; step <= motor.config.saturation_timeout_ms /
+                 motor.config.controller.period_ms; ++step) {
+                const int feedback_direction = variant == 2U && step % 2U != 0U ? -direction : direction;
+                const unsigned int before = tx_count;
+                saturation_tick(&motor, 0.02f * (float)feedback_direction);
+                assert(motor.output.amplitude_limited == amplitude);
+                assert(motor.output.slew_limited != amplitude);
+                assert(motor.saturation_active);
+                assert(motor.saturation_since_ms == saturation_start_ms);
+                assert(!motor.tracking_active && !motor.stall_active);
+                if (tick_ms - saturation_start_ms < motor.config.saturation_timeout_ms) {
+                    assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+                } else {
+                    assert(motor.state == CG_STATE_STOPPING && motor.fault == CG_FAULT_SATURATION);
+                    assert_only_stop_after(before);
+                }
+            }
+        }
+    }
+}
+
+static void transient_saturation_reset_test(void)
+{
+    CyberGearMotor motor;
+    clear_mock(1000U);
+    start_saturation_fixture(&motor, false);
+    for (unsigned int step = 0U; step < 10U; ++step) {
+        saturation_tick(&motor, 0.02f);
+        assert(motor.saturation_active && motor.output.slew_limited);
+        assert(motor.fault == CG_FAULT_NONE);
+    }
+    const uint32_t first_saturation_ms = motor.saturation_since_ms;
+    for (unsigned int step = 0U; step < 40U && motor.saturation_active; ++step)
+        saturation_tick(&motor, 0.0f);
+    assert(!motor.saturation_active && !motor.output.slew_limited && !motor.output.amplitude_limited);
+    assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+    const uint32_t restarted_ms = tick_ms + motor.config.controller.period_ms;
+    for (uint32_t step = 0U; step <= motor.config.saturation_timeout_ms /
+         motor.config.controller.period_ms; ++step) {
+        saturation_tick(&motor, 0.02f);
+        assert(motor.saturation_active && motor.output.slew_limited);
+        assert(motor.saturation_since_ms == restarted_ms && restarted_ms > first_saturation_ms);
+        if (tick_ms - restarted_ms < motor.config.saturation_timeout_ms)
+            assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+        else
+            assert(motor.state == CG_STATE_STOPPING && motor.fault == CG_FAULT_SATURATION);
+    }
+}
+
+static void standalone_feedback_delay_test(void)
+{
+    for (unsigned int original_observer = 0U; original_observer < 2U; ++original_observer) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        assert(cybergear_init(&motor, &can, 0x7fU, 0xfeU));
+        assert(cybergear_test_configure(&motor));
+        if (original_observer != 0U) {
+            CyberGearConfig config = motor.config;
+            config.controller.observer_rad_s = 10.0f;
+            assert(cybergear_configure(&motor, &config));
+        } else assert(motor.config.controller.observer_rad_s <= 6.0f);
+        start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+        CyberGearTestMotion motion;
+        cybergear_test_motion_init(&motion, tick_ms);
+        const uint32_t started_ms = tick_ms;
+        float position_rad = motor.feedback.position_rad;
+        float velocity_rad_s = 0.0f;
+        float position_history[256] = {0};
+        float velocity_history[256] = {0};
+        float current_history[256] = {0};
+        float peak_current_a = 0.0f;
+        unsigned int amplitude_clips = 0U;
+        CyberGearTestResult result = CG_TEST_WAIT;
+        while (tick_ms - started_ms < 8U * CG_TEST_LEG_TIMEOUT_MS &&
+               motion.completed_legs < 8U && !motion.halted) {
+            const uint32_t elapsed_ms = tick_ms - started_ms + 1U;
+            const float delayed_current_a = elapsed_ms > 10U ?
+                current_history[(elapsed_ms - 11U) % 256U] : 0.0f;
+            const float acceleration_rad_s2 = delayed_current_a - 0.45f - 0.2f * velocity_rad_s;
+            position_rad += 0.001f * velocity_rad_s + 0.0000005f * acceleration_rad_s2;
+            velocity_rad_s += 0.001f * acceleration_rad_s2;
+            position_history[elapsed_ms % 256U] = position_rad;
+            velocity_history[elapsed_ms % 256U] = velocity_rad_s;
+            tick_ms++;
+            if (elapsed_ms % 11U == 0U) {
+                const float noise_rad = 0.003f * sinf(0.037f * (float)elapsed_ms);
+                feedback(&motor, 2U, position_history[(elapsed_ms - 10U) % 256U] + noise_rad,
+                    velocity_history[(elapsed_ms - 10U) % 256U], 25.0f, 0U);
+            }
+            if (elapsed_ms % motor.config.controller.period_ms == 0U) {
+                tx_count = 0U;
+                const float previous_current_a = motor.controller.last_queued_current_a;
+                (void)cybergear_control_position_adrc(&motor, motion.target_rad);
+                cybergear_service(&motor);
+                peak_current_a = fmaxf(peak_current_a, fabsf(motor.controller.last_queued_current_a));
+                assert(peak_current_a <= CG_TEST_CURRENT_LIMIT_A);
+                const float current_change_a = motor.controller.last_queued_current_a - previous_current_a;
+                const float period_s = 0.001f * (float)motor.config.controller.period_ms;
+                assert(current_change_a <= motor.config.controller.current_rise_a_s * period_s + 1e-5f);
+                assert(-current_change_a <= motor.config.controller.current_fall_a_s * period_s + 1e-5f);
+                amplitude_clips += motor.output.amplitude_limited ? 1U : 0U;
+                const bool trajectory_done = !motor.trajectory.active && !motor.prepared_ready &&
+                    fabsf(motor.trajectory.target_rad - motion.target_rad) <=
+                        motor.effective_limits.target_tolerance_rad &&
+                    fabsf(motor.requested_target_rad - motion.target_rad) <=
+                        motor.effective_limits.target_tolerance_rad;
+                const float arrival_error_rad = fabsf(motion.target_rad - position_rad);
+                result = cybergear_test_motion_update(&motion, tick_ms,
+                    motor.state == CG_STATE_RUNNING,
+                    tick_ms - motor.feedback.last_received_ms <= motor.config.controller.feedback_timeout_ms,
+                    trajectory_done, motor.feedback.position_rad, motor.controller.velocity_rad_s);
+                if (original_observer == 0U && result == CG_TEST_NEW_TARGET) {
+                    assert(arrival_error_rad <= CG_TEST_REACHED_RAD);
+                    assert(fabsf(velocity_rad_s) <= 0.03f);
+                }
+            }
+            current_history[elapsed_ms % 256U] = motor.controller.last_queued_current_a;
+        }
+        assert(amplitude_clips == 0U);
+        if (original_observer != 0U) {
+            assert(motion.halted && motion.completed_legs < 8U);
+            assert(result == CG_TEST_STOP_FAULT && motor.fault == CG_FAULT_SATURATION);
+        } else {
+            assert(!motion.halted && motion.completed_legs == 8U);
+            assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+        }
+        printf("Standalone delayed/noisy feedback: observer=%.1f rad/s, legs=%lu, fault=%u, peak current=%.3f A\n",
+            (double)motor.config.controller.observer_rad_s, (unsigned long)motion.completed_legs,
+            (unsigned int)motor.fault, (double)peak_current_a);
+    }
+}
+
+static void standalone_loaded_motion_test(void)
+{
+    for (int direction = -1; direction <= 1; direction += 2) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        assert(cybergear_init(&motor, &can, 0x7fU, 0xfeU));
+        assert(cybergear_test_configure(&motor));
+        start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+        CyberGearTestMotion motion;
+        cybergear_test_motion_init(&motion, tick_ms);
+        const uint32_t started_ms = tick_ms;
+        const float load_current_a = 0.94f * (float)direction;
+        const float plant_b0_rad_s2_a = 1.0f;
+        float position_rad = motor.feedback.position_rad;
+        float velocity_rad_s = 0.0f;
+        float peak_current_a = 0.0f;
+        float maximum_arrival_error_rad = 0.0f;
+        float maximum_arrival_speed_rad_s = 0.0f;
+        CyberGearTestResult result = CG_TEST_WAIT;
+        while (tick_ms - started_ms < 8U * CG_TEST_LEG_TIMEOUT_MS &&
+               motion.completed_legs < 8U && !motion.halted) {
+            const float acceleration_rad_s2 = plant_b0_rad_s2_a *
+                (motor.controller.last_queued_current_a - load_current_a) - 0.2f * velocity_rad_s;
+            position_rad += 0.001f * velocity_rad_s + 0.0000005f * acceleration_rad_s2;
+            velocity_rad_s += 0.001f * acceleration_rad_s2;
+            tick_ms++;
+            if ((tick_ms - started_ms) % motor.config.controller.period_ms != 0U) continue;
+            tx_count = 0U;
+            feedback(&motor, 2U, position_rad, velocity_rad_s, 25.0f, 0U);
+            const float previous_current_a = motor.controller.last_queued_current_a;
+            (void)cybergear_control_position_adrc(&motor, motion.target_rad);
+            cybergear_service(&motor);
+            peak_current_a = fmaxf(peak_current_a, fabsf(motor.controller.last_queued_current_a));
+            assert(peak_current_a <= CG_TEST_CURRENT_LIMIT_A);
+            const float current_change_a = motor.controller.last_queued_current_a - previous_current_a;
+            const float period_s = 0.001f * (float)motor.config.controller.period_ms;
+            assert(current_change_a <= motor.config.controller.current_rise_a_s * period_s + 1e-5f);
+            assert(-current_change_a <= motor.config.controller.current_fall_a_s * period_s + 1e-5f);
+            assert(fabsf(motor.output.disturbance_current_a) <= motor.config.dynamics.reserve_current_a);
+            const bool trajectory_done = !motor.trajectory.active && !motor.prepared_ready &&
+                fabsf(motor.trajectory.target_rad - motion.target_rad) <=
+                    motor.effective_limits.target_tolerance_rad &&
+                fabsf(motor.requested_target_rad - motion.target_rad) <=
+                    motor.effective_limits.target_tolerance_rad;
+            const float arrival_error_rad = fabsf(motion.target_rad - position_rad);
+            result = cybergear_test_motion_update(&motion, tick_ms,
+                motor.state == CG_STATE_RUNNING, true, trajectory_done,
+                motor.feedback.position_rad, motor.controller.velocity_rad_s);
+            if (result == CG_TEST_NEW_TARGET) {
+                maximum_arrival_error_rad = fmaxf(maximum_arrival_error_rad, arrival_error_rad);
+                maximum_arrival_speed_rad_s = fmaxf(maximum_arrival_speed_rad_s, fabsf(velocity_rad_s));
+            }
+        }
+        if (motion.halted || motion.completed_legs != 8U)
+            fprintf(stderr, "Standalone load=%.2f A: legs=%lu result=%u fault=%u error=%.6f rad current=%.6f A compensation=%.6f A\n",
+                (double)load_current_a, (unsigned long)motion.completed_legs,
+                (unsigned int)result, (unsigned int)motor.fault,
+                (double)(motion.target_rad - motor.feedback.position_rad),
+                (double)motor.controller.last_queued_current_a,
+                (double)motor.output.disturbance_current_a);
+        assert(!motion.halted && motion.completed_legs == 8U);
+        assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+        assert(maximum_arrival_error_rad <= CG_TEST_REACHED_RAD);
+        assert(maximum_arrival_speed_rad_s <= 0.03f);
+        printf("Standalone synthetic load=%.2f A: 8 legs, maximum arrival error=%.6f rad, peak current=%.3f A\n",
+            (double)load_current_a, (double)maximum_arrival_error_rad, (double)peak_current_a);
+    }
+}
+
 static void configuration_boundaries_test(void)
 {
     CyberGearConfig config = fixture();
@@ -523,5 +759,9 @@ void test_driver(void)
     streaming_and_protection_tests();
     unmanaged_fault_gate_test();
     configured_motion_protection_test();
+    sustained_saturation_protection_test();
+    transient_saturation_reset_test();
+    standalone_feedback_delay_test();
+    standalone_loaded_motion_test();
     puts("Driver: protocol, ownership, startup, faults, TX failure, and wrap passed.");
 }

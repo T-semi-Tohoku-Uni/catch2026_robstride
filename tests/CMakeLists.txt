@@ -40,6 +40,16 @@ endif()
 add_test(NAME robstride_tx_isolation COMMAND robstride_tx_test)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME arm_toolchain_selection
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_arm_toolchain.py"
+        "${CMAKE_COMMAND}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
+set_tests_properties(arm_toolchain_selection PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME cybergear_config_header
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_cybergear_config.py"
+        "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
+add_test(NAME cybergear_standalone_startup
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_standalone_startup.py"
+        "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
 add_test(NAME cybergear_standalone_commands
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_standalone_commands.py"
         "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
@@ -91,7 +101,7 @@ add_test(NAME board_command_integration
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_board_commands.py"
         "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
 if(CYBERGEAR_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    set_tests_properties(cybergear_standalone_commands cybergear_real_tim6_scheduler
+    set_tests_properties(cybergear_config_header cybergear_standalone_startup cybergear_standalone_commands cybergear_real_tim6_scheduler
         cybergear_real_fdcan3_dispatch motor_startup_integration board_command_integration
         PROPERTIES ENVIRONMENT "CATCH_HOST_SANITIZERS=1")
 endif()

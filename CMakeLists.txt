@@ -25,6 +25,14 @@ set(CMAKE_PROJECT_NAME catch2026_robstride)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Core project settings
+if(CMAKE_TOOLCHAIN_FILE)
+    get_filename_component(CATCH_REQUESTED_TOOLCHAIN "${CMAKE_TOOLCHAIN_FILE}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(CATCH_REQUESTED_TOOLCHAIN STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gcc-arm-none-eabi.cmake")
+        set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/toolchains/arm-none-eabi.cmake"
+            CACHE FILEPATH "Arm GNU Toolchain with persistent compiler selection" FORCE)
+    endif()
+endif()
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
@@ -76,10 +84,16 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Add project symbols (macros)
-option(APP_CYBERGEAR_STANDALONE_TEST "Run only the CyberGear homing and motion test" OFF)
-target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    APP_CYBERGEAR_STANDALONE_TEST=$<BOOL:${APP_CYBERGEAR_STANDALONE_TEST}>
-)
+set(APP_CYBERGEAR_STANDALONE_TEST "HEADER" CACHE STRING "CyberGear test mode: HEADER, ON or OFF")
+set_property(CACHE APP_CYBERGEAR_STANDALONE_TEST PROPERTY TYPE STRING)
+set_property(CACHE APP_CYBERGEAR_STANDALONE_TEST PROPERTY STRINGS HEADER ON OFF)
+if(APP_CYBERGEAR_STANDALONE_TEST STREQUAL "ON")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE APP_CYBERGEAR_STANDALONE_TEST=1)
+elseif(APP_CYBERGEAR_STANDALONE_TEST STREQUAL "OFF")
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE APP_CYBERGEAR_STANDALONE_TEST=0)
+elseif(NOT APP_CYBERGEAR_STANDALONE_TEST STREQUAL "HEADER")
+    message(FATAL_ERROR "APP_CYBERGEAR_STANDALONE_TEST must be HEADER, ON or OFF")
+endif()
 
 # Remove wrong libob.a library dependency when using cpp files
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)

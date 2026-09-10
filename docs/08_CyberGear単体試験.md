@@ -1,96 +1,118 @@
 # CyberGear単体試験
 
-現在の既定ビルドは通常4軸制御です。
-CMakeの `-DAPP_CYBERGEAR_STANDALONE_TEST=ON` により単体試験を選択します。
-停止距離の予測保護モデルはユーザー指示によりいったん省略しました。
-以下は想定する動作・ログです。今回の検証は実機を使っていません。
+`APP_CYBERGEAR_STANDALONE_TEST` を `1` にすると、電源投入後はUARTの開始指令を待ちます。
+`s` / `S` を受信してからCyberGearだけを初期化・原点探索し、
+原点基準で **+60度 → -60度 → +5度 → -5度 → +60度…** を繰り返します。
+「左右60度」は片側60度（全幅120度）、「左右5度」は片側5度（全幅10度）です。
+外部基板の開始指令は不要です。既定値は `1`（単体試験ON）です。`0` で通常の4軸制御に戻せます。
 
-## 書き込むファイル
+## 必要な接続
 
-`build/cybergear-swing30-3a/cybergear_swing30_v4_3a.elf`
+- CyberGear：CAN3（RX PA8 / TX PA15）、モーターID `0x7f`、ホストID `0xfe`。
+- 原点探索センサー：PA0。既存の原点探索を使うため、このセンサーは必要です。
+- 開始指令・ログ：USB-UARTのTXをUSART2 RX PA3へ、RXをUSART2 TX PA2へ接続し、GNDを共通にします。
+  115200 bps・8N1・フロー制御なしで、`s` / `S` を送信して開始します。改行は不要です。
+  UART未接続・未入力では待機を続け、モーターの初期化・原点探索・往復動作を開始しません。
 
-起動時と定期ログに `SWING30_V4_3A` が表示されることを確認してください。
-`then hold zero` と出るログは原点保持版のものです。CubeProgrammerの「ブラウザ」で
-上の別名ファイルを選び直し、検証付きで書き込んでから実行してください。
+CyberGearへの指令とフィードバックにCAN3は必須です。
+基板間CAN1は初期化・開始せず、送受信しません。
+RobStrideのID 3・4・5は初期化せず、応答も待ちません。STOPを含む全RobStride送信を禁止します。
+他軸用のPC0/PC1リミットスイッチ入力とEXTI割り込みも初期化しないため、未配線で使用できます。
+接続されている他軸がある場合は、試験開始前に停止させてください。
 
-CubeProgrammerでこのELFを選び、「プログラミング検証」と
-「プログラミング後に実行」を有効にしてダウンロードします。
-実行を選ばない場合は、書き込み後に基板をリセットします。
-外部基板のCAN開始指令やデバッガ操作は不要です。
+## 動作と停止条件
 
-この試験は位置制御の電流上限を3 Aに変更します。過去版では運転後に
-停止距離保護 `fault=16` が作動しました。現行版はその予測計算・判定と起動前の整合性検査を省略しています。
-実機の往復完了は未確認です。
+1. 起動時のUART受信残りを破棄し、`waiting for UART s/S to start homing` を表示します。
+   `s` / `S` の正常受信まで時間制限なく待機します。他の文字や改行、受信エラーでは開始しません。
+2. 開始指令の受信後、CAN3通信を開始し、CyberGearの初期化・応答確認を行います。
+3. PA0センサーを使って既存の原点探索を1回実施し、原点を設定します。
+4. ADRC位置制御を開始し、+60度 → -60度 → +5度 → -5度の順に目標を切り替えます。
+5. 各目標で軌道完了・位置誤差±0.5度以内・推定速度0.03 rad/s以下を1秒維持してから次へ進みます。
 
-## 起動後の動作
+位置制御の電流上限は3 A、目標速度上限は0.3 rad/sです。元の設定がこれより低ければ低い値を使います。
+負荷を打ち消す外乱補償電流には、既存の予約電流枠（全体上限の半分、3 A設定時は1.5 A）を割り当てます。
+外乱推定のリークは固定モード（既定0.03 /s）を使い、目標付近でも負荷補償を維持します。
+以前は補償が0.5 Aで頭打ちになり、さらに目標付近でリークが最大0.5 /sに増えるため、
+保持負荷があると位置誤差が残りました。全体電流上限・電流変化率・到達判定・保護条件は維持します。
+位置フィードバックの遅延・揺れに対する電流指令の変動を抑えるため、単体試験では観測器帯域を
+10 rad/sから最大6 rad/sに抑えます。位置制御帯域4 rad/sと減衰比2は維持します。
+観測器を遅くすると負荷変動への応答も遅くなるため、任意の機構・負荷への適合を保証する設定ではありません。
+原点探索の速度制御は既存設定のままです。
+1区間20秒のタイムアウト、原点から±63度を超える実測位置、フィードバック/制御異常でSTOPを要求します。
+±63度は停止要求の判定境界であり、停止完了位置ではありません。
+往復中はUARTの `x` / `X` でSTOPを要求できます。
+停止後は `s` / `S` を再送しても再始動せず、再試験には基板リセットと新たな開始指令が必要です。
+UARTの停止入力は原点探索中には処理されません。
 
-1. CAN3上のCyberGear（ID `0x7f`、ホストID `0xfe`）の応答を待ちます。
-2. 既存の原点探索を1回実行します。PA0のセンサーを探し、初回探索では
-   60度進んでも切り替わらなければ一度反転します。低速で両方向の境界を測定し、
-   その中央へ移動して原点を設定します。
-3. CyberGearの位置制御を開始し、+30度に向かいます。
-4. +30度 → -30度 → +30度を繰り返します（全幅60度）。軌道の目標速度上限は0.3 rad/s
-   （約17.2度/s）です。実際の速度は加減速と電流予算でも制限されます。
-   軌道完了・実測位置が目標の±0.5度以内・推定速度が
-   0.03 rad/s以下の状態を1秒維持してから反転します。
+## 有効化・無効化とビルド
 
-位置制御中の電流上限は3 Aです。原点探索の速度制御は従来のままです。
-1区間20秒で到達・待機が完了しない場合、実測位置が原点から±33度を超えた場合、
-またはフィードバック/制御異常時にはSTOPを要求し、再始動しません。
-±33度は停止指令を出す判定境界であり、停止完了位置を保証するものではありません。
+設定の編集先は **`Core/Inc/cybergear_config.h`** に統一しています。
+このヘッダーの `APP_CYBERGEAR_STANDALONE_TEST` を `1` / `0` にすると、
+`main.c` の `#if` で起動経路を切り替えます。`app_mode.h` はこの設定を取り込むだけです。
+CMakeの `-DAPP_CYBERGEAR_STANDALONE_TEST=HEADER`（新規構成の既定値）でヘッダーに従います。
+以前のビルドディレクトリに `ON` / `OFF` が保存されている場合は、次のように `HEADER` で再構成してください。
+`ON` / `OFF` を明示した場合は、従来どおりヘッダーより優先して `1` / `0` を定義します。
+CMake以外でもコンパイラの同名 `-D...=1` / `0` がヘッダーより優先されます。
+変更は再ビルド・書込み後に反映されます。UARTからの実行時パラメーター変更ではありません。
 
-RobStrideのID 3・4・5には有効化、位置・速度・電流、ゼロ設定などの
-フレームを送信しません。タイマーのRobStride処理と起動処理を通らず、
-送信関数でも全RobStrideフレームを拒否します。
-RobStrideへのSTOP送信も行わないため、開始前にそれらが停止している状態で使います。
-試験中は外部基板の目標値・開始・復帰指令を無視し、CAN1への周期送信もしません。
+CMake・Ninja・標準Cライブラリ付きArm GCC（STM32CubeCLTなど）をPATHに設定し、リポジトリ直下で実行します。
 
-## 結果の確認
-
-USART2 TX（PA2）とGNDをUSB-UARTに接続し、115200 bps・8N1・フロー制御なしで確認します。
-USB-UARTのTXをUSART2 RX（PA3）にも接続すると、往復中に `x` または `X` を送って
-STOPを要求できます。この入力は原点探索中には処理されません。
-ST-LINKで接続しただけでは、UART配線がなければログは表示されません。
-
-```text
-CG TEST: SWING30_V4_3A; homing then +/-30 deg; RobStride TX disabled
-CG TEST: homing started
-CG TEST: homing complete; +/-30 deg, dwell=1000 ms
-CG TEST: ADRC current<=3.0 A, speed<=0.3 rad/s; x=stop
-CG TEST SWING30_V4_3A state=6 fault=0 online=1 age=...
-CG TEST q=... v=... target=0.5236 limit=...
-CG TEST i_cmd=... halted=0 legs=...
-CG TEST: new target=-0.5236 rad
+```sh
+cmake -S . -B build/cybergear-swing-60-5 -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake \
+  -DCATCH_FIRMWARE_BASENAME=cybergear_swing60_5_3a \
+  -DAPP_CYBERGEAR_STANDALONE_TEST=HEADER
+cmake --build build/cybergear-swing-60-5
 ```
 
-`state=6` は位置制御実行中です。原点探索後、0.5秒ごとに状態・位置・速度・
-センサー入力を表示し、基板LED（PD2）を反転します。
-`target` が +0.5236 / -0.5236 radへ切り替わることを確認します。
-`halted reason=2` は制御/受信異常またはユーザー停止、3は往復範囲からの逸脱、
-4は到達タイムアウトです。電流不足で到達しない場合も、自動的に電流を上げません。
-位置制御の開始失敗は状態・faultでも確認してください。
-原点探索などに失敗すると `CG TEST FAILED` を表示し、STOPの再試行後に待機します。
-運転中の異常は既存の制御保護で停止状態に移行します。通信途絶による自動リセットや
-自動再原点探索は行いません。再試験には明示的な基板リセットが必要です。
+書込み対象は `build/cybergear-swing-60-5/cybergear_swing60_5_3a.elf` です。
+起動ログの識別文字列は `CG_HEADER_CONFIG_V1` です。角度・開始/停止文字は設定から表示します。
+既定の目標値は `1.0472 / -1.0472 / 0.0873 / -0.0873 rad` です。
+定期ログの `err` は実測位置誤差[rad]、`vest` は到達判定に使う推定速度[rad/s]、
+`done` は軌道完了、`dwell` は到達条件を継続して満たしている時間[ms]です。
+`itrk` / `idist` は追従/外乱補償電流[A]、`dlim` は補償電流上限[A]、
+`dclip`（旧ログでは `clipped`）は補償電流の振幅・変化率制限の有無を示します。
+`ireq` は最終制限前の要求電流[A]、`amp` / `slew` は全体電流の振幅/変化速度制限、
+`sat_ms` はいずれかの制限が連続している時間[ms]、`track` は生成軌道と実測位置の差[rad]です。
+`fault=15` は全体電流の振幅または変化速度制限が1000 ms続いたことによる停止です。
+電流が3 A未満でも変化速度制限が続けば停止します。この保護は変更していません。
+停止判定は通常電流の送信前なので、停止ログの `i_cmd` は最後に送信キューへ入った値です。
+無効化するときはCMakeで `-DAPP_CYBERGEAR_STANDALONE_TEST=OFF` を指定して再構成・再ビルドしてください。
 
-## 設定と再ビルド
+## パラメーターの変更方法
 
-機械パラメーターは `Core/Inc/cybergear_config.h` を使用します。
-起動時の設定検査は維持し、位置保護境界は通信表現範囲内の±12.5 radとしています。
-ホストテストは設定の整合性を確認し、実機の機械許容値を検証するものではありません。
+`Core/Inc/cybergear_config.h` に、単位・増減時の影響・通常運転と単体試験の違い・安全上の注意を日本語で記載しています。
+`main.c` や `cybergear_test_motion.h` 内の定数を探して編集する必要はありません。
+ヘッダーの節ごとの主な設定は次のとおりです。
 
-往復の振幅・待機時間・試験用上限は `Core/Inc/cybergear_test_motion.h` にあります。
-位置制御開始前に電流上限と軌道用の加減速電流予算を3 Aに設定し、補償電流上限も整合させます。
-`fault=16` の `CG_FAULT_STOP_MARGIN` は過去ログとの番号互換のため宣言を残していますが、
-現在の実行経路では発報しません。停止距離予測専用の保証減速度・外向き加速度・輸送遅延・停止余裕は削除しました。
-角度・速度・電流・温度・通信・追従・拘束の保護、STOP処理、ADRC・軌道・慣性モデルは維持します。
-軌道用の加減速制約と電流変化率制限も使用します。実機での許容値と停止挙動は未検証です。
+| 節 | 変更できる内容 | 主なマクロ |
+| --- | --- | --- |
+| 1 | 試験ON/OFF、UART速度・開始/停止文字、ログ周期 | `APP_CYBERGEAR_STANDALONE_TEST`, `CG_TEST_START_COMMAND`, `CG_TEST_LOG_INTERVAL_MS` |
+| 2 | 大小振幅、到達待機、区間タイムアウト、試験用電流・速度・観測器 | `CG_TEST_AMPLITUDE_DEG`, `CG_TEST_SMALL_AMPLITUDE_DEG`, `CG_TEST_DWELL_MS`, `CG_TEST_CURRENT_LIMIT_A` |
+| 3 | ADRC帯域・減衰、電流変化率、外乱補償・リーク | `CYBERGEAR_CONTROL_BANDWIDTH_RAD_S`, `CYBERGEAR_CURRENT_RISE_A_S`, `CYBERGEAR_LEAK_FIXED_S` |
+| 4 | 通信ID、ソフト/ハード位置範囲、速度・温度保護、入力ゲイン | `CYBERGEAR_MOTOR_ID`, `CYBERGEAR_SOFT_MIN_RAD`, `CYBERGEAR_B0_FIXED` |
+| 5 | 軌道速度・加減速・jerk、補償用予約電流 | `CYBERGEAR_TRAJECTORY_SPEED_RAD_S`, `CYBERGEAR_DYNAMICS_RESERVE_CURRENT_FRACTION` |
+| 6 | 追従誤差・電流飽和・停滞の停止、起動停止・計画時間 | `CYBERGEAR_SATURATION_TIMEOUT_MS`, `CYBERGEAR_TRACKING_TIMEOUT_MS` |
+| 7 | 原点探索の速度・角度・デバウンス・タイムアウト | `CYBERGEAR_HOMING_FAST_SPEED_RAD_S`, `CYBERGEAR_HOMING_PHASE_TIMEOUT_MS` |
+| 8 | 姿勢モデル、内蔵PD比較、制御診断ログ | `CYBERGEAR_COMPARE_OPERATION_MODE`, `CYBERGEAR_LOG_UART` |
 
-CubeMX生成済みファイルとCMake・Ninja・Arm GCCがPATHにある環境で実行します。
+例えば大振幅だけ変える場合は `CG_TEST_AMPLITUDE_DEG` を編集します。内部用の `_RAD` は度から自動換算します。
+大小振幅は `0 < 小振幅 <= 大振幅` とし、機械の可動範囲と区間所要時間を確認してください。
+`CG_TEST_CURRENT_LIMIT_A`・`CG_TEST_SPEED_RAD_S`・`CG_TEST_OBSERVER_RAD_S` は通常設定との小さい方が実効値です。
+外乱補償は `CG_TEST_DISTURBANCE_CURRENT_FRACTION × 実効電流上限`、予約電流は
+`CG_TEST_RESERVE_CURRENT_FRACTION × 実効電流上限` です。補償割合以下に予約割合を下げないでください。
+原点探索は別設定であり、試験の3 A・0.3 rad/s制限やUART停止文字では保護されません。
+到達判定・電流制限・保護停止の既定値は変更していません。停止を回避する目的だけで保護値を緩めないでください。
 
-```powershell
-cmake -S . -B build/cybergear-swing30-3a -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake' '-DCATCH_FIRMWARE_BASENAME=cybergear_swing30_v4_3a' '-DAPP_CYBERGEAR_STANDALONE_TEST=ON'
-cmake --build build/cybergear-swing30-3a
-```
+設定検査と既存の制御保護を使用します。
+停止距離の予測保護モデルは既存実装で省略されており、この試験でも追加しません。
 
-通常の全軸動作へ戻す場合はCMakeを `-DAPP_CYBERGEAR_STANDALONE_TEST=OFF` で再構成し、再ビルドします。
+ホストテストはヘッダーの変更値の反映、UART開始待ち、目標の順序・待機・範囲逸脱・故障ラッチ・時刻の周回、CAN1/他軸との分離を検査します。
+±0.94 A相当の一定負荷を与える合成プラントで、実ドライバー・軌道・ADRC・量子化された位置フィードバックを
+組み合わせ、到達誤差±0.5度・推定速度0.03 rad/s以下・待機1秒のまま2周完了することも検査します。
+これは実機の負荷を同定したモデルではありません。
+さらに11 ms周期の受信、指令・位置それぞれ10 msの遅延、0.003 rad振幅の位置ノイズを与える試験で、
+旧観測器帯域10 rad/sの `fault=15` を再現し、6 rad/sでは同じ保護・到達条件で2周完了することを確認します。
+持続する振幅制限・変化速度制限（増減の反転を含む）で1000 ms後に停止する回帰テストも実施します。
+実機での往復動作、機械許容範囲、停止位置は未検証です。

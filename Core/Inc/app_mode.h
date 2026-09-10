@@ -1,8 +1,6 @@
 #ifndef APP_MODE_H
 #define APP_MODE_H
 
-#ifndef APP_CYBERGEAR_STANDALONE_TEST
-#define APP_CYBERGEAR_STANDALONE_TEST 0
-#endif
+#include "cybergear_config.h"
 
 #endif

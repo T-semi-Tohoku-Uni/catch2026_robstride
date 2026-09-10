@@ -454,10 +454,28 @@ void cybergear_config_defaults(CyberGearConfig *c)
     cybergear_controller_default_config(&c->controller);
     c->hardware_confirmed = CYBERGEAR_HARDWARE_CONFIRMED != 0;
     c->controller.period_ms = CYBERGEAR_USE_200_HZ ? 5U : 10U;
+    c->controller.timing_tolerance_ms = CYBERGEAR_TIMING_TOLERANCE_MS;
+    c->controller.feedback_timeout_ms = CYBERGEAR_FEEDBACK_TIMEOUT_MS;
+    c->controller.bandwidth_rad_s = CYBERGEAR_CONTROL_BANDWIDTH_RAD_S;
+    c->controller.damping_ratio = CYBERGEAR_CONTROL_DAMPING_RATIO;
+    c->controller.observer_rad_s = CYBERGEAR_OBSERVER_RAD_S;
     c->controller.b0_initial = CYBERGEAR_B0_FIXED;
     c->controller.b0_min = CYBERGEAR_B0_MIN;
     c->controller.b0_max = CYBERGEAR_B0_MAX;
     c->controller.current_limit_a = CYBERGEAR_CURRENT_LIMIT_A;
+    c->controller.current_rise_a_s = CYBERGEAR_CURRENT_RISE_A_S;
+    c->controller.current_fall_a_s = CYBERGEAR_CURRENT_FALL_A_S;
+    c->controller.disturbance_limit_a = CYBERGEAR_DISTURBANCE_LIMIT_A;
+    c->controller.disturbance_slew_a_s = CYBERGEAR_DISTURBANCE_SLEW_A_S;
+    c->controller.compensation_gain = CYBERGEAR_COMPENSATION_GAIN;
+    c->controller.compensation_delay_ms = CYBERGEAR_COMPENSATION_DELAY_MS;
+    c->controller.compensation_ramp_ms = CYBERGEAR_COMPENSATION_RAMP_MS;
+    c->controller.leak_mode = CYBERGEAR_LEAK_MODE;
+    c->controller.leak_fixed_s = CYBERGEAR_LEAK_FIXED_S;
+    c->controller.leak_near_s = CYBERGEAR_LEAK_NEAR_S;
+    c->controller.leak_far_s = CYBERGEAR_LEAK_FAR_S;
+    c->controller.leak_near_rad = CYBERGEAR_LEAK_NEAR_RAD;
+    c->controller.leak_far_rad = CYBERGEAR_LEAK_FAR_RAD;
     c->trajectory = (CgTrajectoryLimits){
         .position_min_rad = CYBERGEAR_SOFT_MIN_RAD,
         .position_max_rad = CYBERGEAR_SOFT_MAX_RAD,
@@ -465,40 +483,43 @@ void cybergear_config_defaults(CyberGearConfig *c)
         .acceleration_max_rad_s2 = CYBERGEAR_TRAJECTORY_ACCEL_RAD_S2,
         .braking_max_rad_s2 = CYBERGEAR_TRAJECTORY_BRAKE_RAD_S2,
         .jerk_max_rad_s3 = CYBERGEAR_TRAJECTORY_JERK_RAD_S3,
-        .duration_min_s = 0.1f, .duration_max_s = 60.0f,
-        .target_tolerance_rad = 0.0001f, .search_iterations = 32U
+        .duration_min_s = CYBERGEAR_TRAJECTORY_DURATION_MIN_S,
+        .duration_max_s = CYBERGEAR_TRAJECTORY_DURATION_MAX_S,
+        .target_tolerance_rad = CYBERGEAR_TRAJECTORY_TARGET_TOLERANCE_RAD,
+        .search_iterations = CYBERGEAR_TRAJECTORY_SEARCH_ITERATIONS
     };
     c->hard_min_rad = CYBERGEAR_HARD_MIN_RAD;
     c->hard_max_rad = CYBERGEAR_HARD_MAX_RAD;
     c->speed_trip_rad_s = CYBERGEAR_SPEED_TRIP_RAD_S;
     c->temperature_trip_c = CYBERGEAR_TEMPERATURE_TRIP_C;
-    c->position_jump_rad = 0.02f;
-    c->tracking_error_rad = 0.15f;
-    c->tracking_timeout_ms = 500U;
-    c->saturation_timeout_ms = 1000U;
-    c->stall_current_a = 0.8f * c->controller.current_limit_a;
-    c->stall_progress_rad = 0.003f;
-    c->stall_timeout_ms = 1000U;
-    c->stationary_speed_rad_s = 0.03f;
-    c->stationary_dwell_ms = 100U;
-    c->startup_timeout_ms = 3000U;
-    c->command_retry_ms = 50U;
-    c->stop_timeout_ms = 1000U;
-    c->stop_max_attempts = 20U;
-    c->planner_lead_ms = 50U;
-    c->planner_timeout_ms = 500U;
-    c->operation_kp = NAN;
-    c->operation_kd = NAN;
-    c->operation_torque_limit_nm = NAN;
+    c->position_jump_rad = CYBERGEAR_POSITION_JUMP_RAD;
+    c->tracking_error_rad = CYBERGEAR_TRACKING_ERROR_RAD;
+    c->tracking_timeout_ms = CYBERGEAR_TRACKING_TIMEOUT_MS;
+    c->saturation_timeout_ms = CYBERGEAR_SATURATION_TIMEOUT_MS;
+    c->stall_current_a = CYBERGEAR_STALL_CURRENT_FRACTION * c->controller.current_limit_a;
+    c->stall_progress_rad = CYBERGEAR_STALL_PROGRESS_RAD;
+    c->stall_timeout_ms = CYBERGEAR_STALL_TIMEOUT_MS;
+    c->stationary_speed_rad_s = CYBERGEAR_STATIONARY_SPEED_RAD_S;
+    c->stationary_dwell_ms = CYBERGEAR_STATIONARY_DWELL_MS;
+    c->startup_timeout_ms = CYBERGEAR_STARTUP_TIMEOUT_MS;
+    c->command_retry_ms = CYBERGEAR_COMMAND_RETRY_MS;
+    c->stop_timeout_ms = CYBERGEAR_STOP_TIMEOUT_MS;
+    c->stop_max_attempts = CYBERGEAR_STOP_MAX_ATTEMPTS;
+    c->planner_lead_ms = CYBERGEAR_PLANNER_LEAD_MS;
+    c->planner_timeout_ms = CYBERGEAR_PLANNER_TIMEOUT_MS;
+    c->operation_kp = CYBERGEAR_OPERATION_KP;
+    c->operation_kd = CYBERGEAR_OPERATION_KD;
+    c->operation_torque_limit_nm = CYBERGEAR_OPERATION_TORQUE_LIMIT_NM;
     c->dynamics = (CyberGearDynamicsConfig){
         .fixed_b0 = c->controller.b0_initial,
         .b0_min = c->controller.b0_min, .b0_max = c->controller.b0_max,
-        .b0_rate_limit = 1.0f, .posture_timeout_ms = 100U,
+        .b0_rate_limit = CYBERGEAR_B0_RATE_LIMIT,
+        .posture_timeout_ms = CYBERGEAR_POSTURE_TIMEOUT_MS,
         .acceleration_current_a = c->controller.current_limit_a,
         .braking_current_a = c->controller.current_limit_a,
-        .reserve_current_a = 0.5f * c->controller.current_limit_a,
+        .reserve_current_a = CYBERGEAR_DYNAMICS_RESERVE_CURRENT_FRACTION * c->controller.current_limit_a,
         .current_slew_a_s = fminf(c->controller.current_rise_a_s, c->controller.current_fall_a_s),
-        .reserve_slew_a_s = 2.5f,
+        .reserve_slew_a_s = CYBERGEAR_DYNAMICS_RESERVE_SLEW_A_S,
         .acceleration_cap_rad_s2 = c->trajectory.acceleration_max_rad_s2,
         .braking_cap_rad_s2 = c->trajectory.braking_max_rad_s2,
         .jerk_cap_rad_s3 = c->trajectory.jerk_max_rad_s3
