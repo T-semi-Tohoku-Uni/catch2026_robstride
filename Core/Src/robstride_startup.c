@@ -17,13 +17,21 @@ static bool startup_valid(const RobstrideStartup *startup)
 }
 
 bool robstride_startup_init(RobstrideStartup *startup, RobstrideMotor *motors,
-    uint32_t motor_count)
+    uint32_t motor_count, const float *current_limits_a)
 {
     if (startup == NULL) return false;
     memset(startup, 0, sizeof(*startup));
-    if (motors == NULL || motor_count == 0U || motor_count > ROBSTRIDE_STARTUP_MAX_MOTORS) {
+    if (motors == NULL || current_limits_a == NULL || motor_count == 0U ||
+        motor_count > ROBSTRIDE_STARTUP_MAX_MOTORS) {
         startup->failed = true;
         return false;
+    }
+    for (uint32_t index = 0U; index < motor_count; ++index) {
+        if (!isfinite(current_limits_a[index]) || current_limits_a[index] < 0.0f) {
+            startup->failed = true;
+            return false;
+        }
+        startup->axes[index].current_limit_a = current_limits_a[index];
     }
     startup->motors = motors;
     startup->motor_count = motor_count;
@@ -122,7 +130,7 @@ void robstride_startup_update(RobstrideStartup *startup)
             write_queued = robstride_set_pp_acceleration(motor, ROBSTRIDE_STARTUP_ACCELERATION_RAD_S2);
             break;
         case RS_STARTUP_SET_CURRENT:
-            write_queued = robstride_set_current_limit(motor, ROBSTRIDE_STARTUP_CURRENT_A);
+            write_queued = robstride_set_current_limit(motor, axis->current_limit_a);
             break;
         case RS_STARTUP_SET_HOLD:
             axis->hold_position_rad = feedback.position_rad;
@@ -140,13 +148,13 @@ void robstride_startup_update(RobstrideStartup *startup)
             if (now_ms - axis->enabled_ms >= ROBSTRIDE_STARTUP_RETRY_MS) {
                 axis->stage = RS_STARTUP_SEND_STOP;
             } else if (now_ms - axis->last_probe_ms >= ROBSTRIDE_STARTUP_PROBE_MS) {
-                robstride_set_current_limit(motor, ROBSTRIDE_STARTUP_CURRENT_A);
+                robstride_set_current_limit(motor, axis->current_limit_a);
                 axis->last_probe_ms = now_ms;
             }
             break;
         case RS_STARTUP_READY:
             if (now_ms - axis->last_probe_ms >= ROBSTRIDE_STARTUP_PROBE_MS) {
-                robstride_set_current_limit(motor, ROBSTRIDE_STARTUP_CURRENT_A);
+                robstride_set_current_limit(motor, axis->current_limit_a);
                 axis->last_probe_ms = now_ms;
             }
             break;

@@ -801,7 +801,12 @@ bool cybergear_base_init(void)
 
 static bool motor_start_control(void)
 {
-  if (!robstride_startup_init(&robstride_startup, robstride_handler, 3U) ||
+  const float current_limits_a[3] = {
+    [RIGHT_RS03_INDEX] = ROBSTRIDE_RIGHT_RS03_CURRENT_LIMIT_A,
+    [LEFT_RS03_INDEX] = ROBSTRIDE_LEFT_RS03_CURRENT_LIMIT_A,
+    [EL05_INDEX] = ROBSTRIDE_EL05_CURRENT_LIMIT_A
+  };
+  if (!robstride_startup_init(&robstride_startup, robstride_handler, 3U, current_limits_a) ||
       !cybergear_begin_position_control(&cybergear_base, CYBERGEAR_COMPARE_OPERATION_MODE ?
           CYBERGEAR_RUN_MODE_OPERATION : CYBERGEAR_RUN_MODE_CURRENT))
     return false;

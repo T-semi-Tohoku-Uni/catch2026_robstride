@@ -11,7 +11,10 @@
 #define ROBSTRIDE_STARTUP_FEEDBACK_MS 100U
 #define ROBSTRIDE_STARTUP_VELOCITY_RAD_S 10.0f
 #define ROBSTRIDE_STARTUP_ACCELERATION_RAD_S2 1.0f
-#define ROBSTRIDE_STARTUP_CURRENT_A 10.0f
+/* Per-motor current limits [A]. Applied on every startup and retry. */
+#define ROBSTRIDE_RIGHT_RS03_CURRENT_LIMIT_A 12.0f
+#define ROBSTRIDE_LEFT_RS03_CURRENT_LIMIT_A 12.0f
+#define ROBSTRIDE_EL05_CURRENT_LIMIT_A 10.0f
 
 typedef enum {
     RS_STARTUP_SEND_STOP,
@@ -33,6 +36,7 @@ typedef struct {
     uint32_t last_probe_ms;
     uint32_t enabled_ms;
     float hold_position_rad;
+    float current_limit_a;
 } RobstrideStartupAxis;
 
 typedef struct {
@@ -46,7 +50,7 @@ typedef struct {
 } RobstrideStartup;
 
 bool robstride_startup_init(RobstrideStartup *startup, RobstrideMotor *motors,
-    uint32_t motor_count);
+    uint32_t motor_count, const float *current_limits_a);
 void robstride_startup_update(RobstrideStartup *startup);
 bool robstride_startup_ready(RobstrideStartup *startup);
 bool robstride_startup_failed(RobstrideStartup *startup);
