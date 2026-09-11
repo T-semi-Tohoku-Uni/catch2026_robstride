@@ -25,6 +25,14 @@ set(CMAKE_PROJECT_NAME catch2026_robstride)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
 # Core project settings
+if(CMAKE_TOOLCHAIN_FILE)
+    get_filename_component(CATCH_REQUESTED_TOOLCHAIN "${CMAKE_TOOLCHAIN_FILE}" ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(CATCH_REQUESTED_TOOLCHAIN STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/cmake/gcc-arm-none-eabi.cmake")
+        set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/toolchains/arm-none-eabi.cmake"
+            CACHE FILEPATH "Arm GNU Toolchain with persistent compiler selection" FORCE)
+    endif()
+endif()
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 

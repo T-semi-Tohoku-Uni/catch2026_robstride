@@ -52,6 +52,18 @@ IDE の個人設定、ビルド成果物、キャッシュも管理対象外で�
 Release ビルドは両方のコマンドで `Debug` を `Release` に置き換えます。
 IDE やデバッガの設定は各自の環境で作成してください。
 
+生成された GCC プリセットは、`toolchains/arm-none-eabi.cmake` を経由して
+標準Cヘッダー・`libc`・`libm`・`nano.specs` が揃ったコンパイラーを選択します。
+PATH 上のコンパイラーが不完全な場合は、STM32CubeCLT の標準インストール先を探します。
+任意の場所を使う場合は `-DARM_GNU_TOOLCHAIN_BIN_DIR=/path/to/toolchain/bin` を指定してください。
+`stdint.h: No such file or directory` などが出た既存のビルドは、キャッシュをリセットして再構成します
+（`--fresh` は CMake 3.24 以上。CLion では「キャッシュのリセットとプロジェクトの再読み込み」）。
+
+```sh
+cmake --fresh --preset Debug
+cmake --build --preset Debug
+```
+
 ## STM32G474RB の Flash 配置
 
 本プロジェクトは実機で確認した `DBANK=1` を前提にします。128 KB品のFlashは
