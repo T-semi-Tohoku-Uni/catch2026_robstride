@@ -31,6 +31,8 @@
 #include "cybergear.h"
 #include "app_mode.h"
 #include "cybergear_test_motion.h"
+#include "cybergear_console.h"
+#include "cybergear_tuning.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -94,6 +96,11 @@ static volatile uint32_t motor_can_last_rx_dlc = 0U;
 static volatile uint32_t motor_can_last_rx_id_type = 0U;
 #if APP_CYBERGEAR_STANDALONE_TEST
 static CyberGearTestMotion cybergear_test_motion;
+static CyberGearConsole cybergear_console;
+static CyberGearTuning cybergear_test_tuning, cybergear_test_candidate;
+static bool cybergear_test_initialized, cybergear_test_can_started;
+static volatile bool cybergear_test_timer_active;
+static uint8_t cybergear_test_control_phase;
 #else
 static RobstrideStartup robstride_startup;
 #endif
@@ -327,6 +334,13 @@ static void cybergear_debug_print(void)
 }
 static bool cybergear_homing_feedback(CyberGearFeedback *feedback)
 {
+#if APP_CYBERGEAR_STANDALONE_TEST
+  if (cybergear_console.stop_requested || cybergear_base.motor_fault_sequence != 0U)
+  {
+    cybergear_stop(&cybergear_base);
+    return false;
+  }
+#endif
   motor_check_feedback();
   const uint32_t interrupt_mask = __get_PRIMASK();
   __disable_irq();
@@ -481,6 +495,9 @@ static bool cybergear_homing_move_to_center(float center_rad)
 
 bool cybergear_homing(void)
 {
+#if APP_CYBERGEAR_STANDALONE_TEST
+  if (cybergear_console.stop_requested) return false;
+#endif
   // 1. 速度制御モードに変更して有効化
   if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_SPEED)) 
   {
@@ -503,6 +520,13 @@ bool cybergear_homing(void)
   CyberGearFeedback feedback;
   while (1)
   {
+#if APP_CYBERGEAR_STANDALONE_TEST
+    if (cybergear_console.stop_requested)
+    {
+      cybergear_stop(&cybergear_base);
+      return false;
+    }
+#endif
     motor_check_feedback();
     const uint32_t interrupt_mask = __get_PRIMASK();
     __disable_irq();
@@ -655,15 +679,24 @@ static void motor_prepare_handlers(void)
 
 bool cybergear_base_init(void)
 {
-  if (!cybergear_init(
+#if APP_CYBERGEAR_STANDALONE_TEST
+  if (!cybergear_test_initialized || cybergear_base.fault != CG_FAULT_NONE ||
+      cybergear_base.motor_fault_sequence != 0U) return false;
+#else
+  const uint32_t init_mask = __get_PRIMASK();
+  __disable_irq();
+  const bool initialized = cybergear_init(
     &cybergear_base,
     &hfdcan3,
     CYBER_GEAR_ID,
     HOST_ID
-  ))
+  );
+  __set_PRIMASK(init_mask);
+  if (!initialized)
   {
     return false;
   }
+#endif
 
   /* Reject incomplete machine settings before the legacy homing can energize CG. */
   if (!cybergear_config_valid(&cybergear_base.config))
@@ -678,6 +711,10 @@ bool cybergear_base_init(void)
   uint32_t last_probe_ms = wait_started_ms - CYBERGEAR_HOMING_PROBE_INTERVAL_MS;
   while (1)
   {
+#if APP_CYBERGEAR_STANDALONE_TEST
+    if (cybergear_console.stop_requested || cybergear_base.fault != CG_FAULT_NONE ||
+        cybergear_base.motor_fault_sequence != 0U) return false;
+#endif
     const uint32_t interrupt_mask = __get_PRIMASK();
     __disable_irq();
     const CyberGearFeedback feedback = cybergear_base.feedback;
@@ -750,22 +787,44 @@ static bool motor_start_control(void)
 #endif
 
 #if APP_CYBERGEAR_STANDALONE_TEST
-static void cybergear_test_wait_for_start(void)
+static void cybergear_test_console_flush(void)
+{
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  const bool stop_requested = cybergear_console.stop_requested;
+  const bool discard_line = cybergear_console.dropping || cybergear_console.receiving_line;
+  cybergear_console_init(&cybergear_console);
+  cybergear_console.stop_requested = stop_requested;
+  cybergear_console.dropping = discard_line;
+  cybergear_console.receiving_line = discard_line;
+  __set_PRIMASK(mask);
+}
+
+void USART2_IRQHandler(void)
+{
+  const uint32_t status = READ_REG(huart2.Instance->ISR);
+  if ((status & (UART_FLAG_PE | UART_FLAG_FE | UART_FLAG_NE | UART_FLAG_ORE)) != 0U)
+  {
+    __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_PEF | UART_CLEAR_FEF | UART_CLEAR_NEF | UART_CLEAR_OREF);
+    if ((status & UART_FLAG_RXNE) != 0U) (void)READ_REG(huart2.Instance->RDR);
+    cybergear_console_receive_error(&cybergear_console);
+    return;
+  }
+  if ((status & UART_FLAG_RXNE) != 0U)
+    cybergear_console_receive(&cybergear_console, (uint8_t)READ_REG(huart2.Instance->RDR));
+}
+
+static void cybergear_test_console_init(void)
 {
   __HAL_UART_SEND_REQ(&huart2, UART_RXDATA_FLUSH_REQUEST);
-  __HAL_UART_CLEAR_OREFLAG(&huart2);
-  printf("CG TEST: " CG_TEST_FIRMWARE_TAG "; waiting for UART %c/%c to start homing\r\n",
-         CG_TEST_START_COMMAND, CG_TEST_START_COMMAND_UPPER);
-  while (1)
-  {
-    uint8_t command;
-    if (HAL_UART_Receive(&huart2, &command, 1U, CG_TEST_UART_START_POLL_MS) == HAL_OK &&
-        (command == CG_TEST_START_COMMAND || command == CG_TEST_START_COMMAND_UPPER))
-    {
-      printf("CG TEST: UART start accepted\r\n");
-      return;
-    }
-  }
+  __HAL_UART_CLEAR_FLAG(&huart2, UART_CLEAR_PEF | UART_CLEAR_FEF | UART_CLEAR_NEF | UART_CLEAR_OREF);
+  cybergear_test_console_flush();
+  HAL_NVIC_SetPriority(USART2_IRQn, 2U, 0U);
+  HAL_NVIC_ClearPendingIRQ(USART2_IRQn);
+  HAL_NVIC_EnableIRQ(USART2_IRQn);
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_PE);
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_ERR);
 }
 
 static bool cybergear_test_trajectory_done(void)
@@ -777,11 +836,11 @@ static bool cybergear_test_trajectory_done(void)
       cybergear_base.effective_limits.target_tolerance_rad;
 }
 
-static void cybergear_test_status(void)
+static void cybergear_test_status(bool force)
 {
   static uint32_t last_print_ms = 0U;
   const uint32_t now_ms = HAL_GetTick();
-  if ((uint32_t)(now_ms - last_print_ms) < CG_TEST_LOG_INTERVAL_MS) return;
+  if (!force && (uint32_t)(now_ms - last_print_ms) < CG_TEST_LOG_INTERVAL_MS) return;
   last_print_ms = now_ms;
   const uint32_t interrupt_mask = __get_PRIMASK();
   __disable_irq();
@@ -829,95 +888,292 @@ static void cybergear_test_status(void)
          (double)tracking_error_rad);
 }
 
-static void cybergear_test_halt(const char *reason)
+static bool cybergear_test_can_ready(void)
 {
+  if (cybergear_test_can_started) return true;
+  if (motor_CAN_RxTxSettings_init(&motor_txheader) != HAL_OK) return false;
+  cybergear_test_can_started = true;
+  return true;
+}
+
+static bool cybergear_test_reinitialize(const CyberGearTuning *settings)
+{
+  if (!cybergear_tuning_valid(settings)) return false;
+  uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  cybergear_test_timer_active = false;
+  const HAL_StatusTypeDef timer_status = HAL_TIM_Base_Stop_IT(&htim6);
   cybergear_test_motion.halted = true;
-  printf("CG TEST FAILED: %s; reset required to retry\r\n", reason);
-  motor_init_print_can_status();
-  cybergear_stop(&cybergear_base);
-  uint32_t stop_attempts = 1U;
-  uint32_t last_stop_ms = HAL_GetTick();
-  /* No timer has been started on these failure paths. Service bounded STOP
-   * retries here, then remain faulted; never automatically re-enable. */
-  while (1)
+  __set_PRIMASK(mask);
+  cybergear_test_console_flush();
+  if (!cybergear_test_can_ready()) return false;
+  mask = __get_PRIMASK();
+  __disable_irq();
+  if (!cybergear_test_initialized)
+    cybergear_test_initialized = cybergear_init(&cybergear_base, &hfdcan3, CYBER_GEAR_ID, HOST_ID);
+  const bool requested = cybergear_test_initialized &&
+      cybergear_request_reinitialize_stop(&cybergear_base);
+  __set_PRIMASK(mask);
+  if (!requested) return false;
+  printf("CG CONSOLE: stopping; waiting for fresh STOP and stationary feedback\r\n");
+  const uint32_t started_ms = HAL_GetTick();
+  while ((uint32_t)(HAL_GetTick() - started_ms) <=
+      cybergear_base.config.stop_timeout_ms + cybergear_base.config.command_retry_ms)
   {
-    if (cybergear_base.managed)
+    mask = __get_PRIMASK();
+    __disable_irq();
+    cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
+    const bool failed = cybergear_base.state == CG_STATE_FAULT &&
+        (!cybergear_base.reset_confirmed || !cybergear_base.stationary);
+    const bool queue_empty = HAL_FDCAN_IsTxBufferMessagePending(&hfdcan3,
+        FDCAN_TX_BUFFER0 | FDCAN_TX_BUFFER1 | FDCAN_TX_BUFFER2) == 0U;
+    const bool stopped = queue_empty && cybergear_reset_fault(&cybergear_base);
+    const bool cancelled = cybergear_console.stop_requested;
+    bool initialized = false;
+    if (stopped && timer_status == HAL_OK && !cancelled)
     {
-      cybergear_control_position_adrc(&cybergear_base, 0.0f);
+      initialized = cybergear_init(&cybergear_base, &hfdcan3, CYBER_GEAR_ID, HOST_ID) &&
+          cybergear_configure(&cybergear_base, &settings->motor);
+      if (initialized)
+      {
+        cybergear_test_tuning = *settings;
+        initialized = cybergear_test_motion_init_settings(&cybergear_test_motion, HAL_GetTick(),
+            settings->amplitude_deg, settings->small_amplitude_deg, settings->dwell_ms, settings->leg_timeout_ms);
+        cybergear_test_motion.halted = true;
+        target_angle[0] = 0.0f;
+        cybergear_test_control_phase = 0U;
+      }
     }
-    else if (stop_attempts < CYBERGEAR_STOP_MAX_ATTEMPTS &&
-             (uint32_t)(HAL_GetTick() - last_stop_ms) >= CYBERGEAR_COMMAND_RETRY_MS)
+    __set_PRIMASK(mask);
+    if (stopped)
     {
-      cybergear_stop(&cybergear_base);
-      stop_attempts++;
-      last_stop_ms = HAL_GetTick();
+      cybergear_test_console_flush();
+      if (initialized)
+        printf("CG CONSOLE: reinitialized; drive disabled\r\n");
+      return initialized;
     }
-    cybergear_test_status();
+    if (failed) break;
     HAL_Delay(CG_TEST_STOP_POLL_MS);
   }
+  cybergear_test_console_flush();
+  printf("CG CONSOLE: STOP unconfirmed; settings unchanged; check motor then reinit + Enter\r\n");
+  return false;
+}
+
+static bool cybergear_test_start(void)
+{
+  if (!cybergear_test_reinitialize(&cybergear_test_tuning)) return false;
+  if (cybergear_console.stop_requested || !cybergear_base_init()) return false;
+  if (!cybergear_configure(&cybergear_base, &cybergear_test_tuning.motor)) return false;
+  printf("CG TEST: homing started; %c=stop; other input discarded while busy\r\n", CG_TEST_STOP_COMMAND);
+  if (!cybergear_homing() || cybergear_console.stop_requested) return false;
+  target_angle[0] = 0.0f;
+  if (!cybergear_begin_position_control(&cybergear_base, CYBERGEAR_RUN_MODE_CURRENT)) return false;
+  while (1)
+  {
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    const CyberGearState startup_state = cybergear_base.state;
+    const CyberGearFeedback startup_feedback = cybergear_base.feedback;
+    const uint32_t startup_now_ms = HAL_GetTick();
+    const uint32_t quiet_ms = cybergear_base.quiet_active ?
+        (uint32_t)(startup_now_ms - cybergear_base.quiet_since_ms) : 0U;
+    if (cybergear_console.stop_requested) cybergear_stop(&cybergear_base);
+    const bool healthy = cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
+    const bool running = cybergear_base.state == CG_STATE_RUNNING;
+    __set_PRIMASK(mask);
+    if (!healthy)
+    {
+      printf("CG startup failed: phase=%u fault=%u elapsed=%lu ms\r\n",
+             (unsigned int)startup_state, (unsigned int)cybergear_base.fault,
+             (unsigned long)(startup_now_ms - cybergear_base.startup_ms));
+      printf("CG startup feedback: mode=%u online=%u age=%lu v=%.5f q=%.5f\r\n",
+             (unsigned int)startup_feedback.mode, (unsigned int)startup_feedback.online,
+             (unsigned long)(startup_now_ms - startup_feedback.last_received_ms),
+             (double)startup_feedback.velocity_rad_s, (double)startup_feedback.position_rad);
+      printf("CG startup stationary: limit=%.5f quiet_ms=%lu required_ms=%lu\r\n",
+             (double)cybergear_base.config.stationary_speed_rad_s,
+             (unsigned long)quiet_ms, (unsigned long)cybergear_base.config.stationary_dwell_ms);
+      printf("CG startup readback: pending=%u valid=%u value=%u requested=%u\r\n",
+             (unsigned int)cybergear_base.mode_read_pending,
+             (unsigned int)cybergear_base.mode_read_valid,
+             (unsigned int)cybergear_base.mode_read_value,
+             (unsigned int)cybergear_base.requested_mode);
+      return false;
+    }
+    if (running) break;
+    cybergear_service(&cybergear_base);
+    HAL_Delay(cybergear_base.config.controller.period_ms);
+  }
+  if (!cybergear_test_motion_init_settings(&cybergear_test_motion, HAL_GetTick(),
+      cybergear_test_tuning.amplitude_deg, cybergear_test_tuning.small_amplitude_deg,
+      cybergear_test_tuning.dwell_ms, cybergear_test_tuning.leg_timeout_ms)) return false;
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  if (cybergear_console.stop_requested)
+  {
+    cybergear_stop(&cybergear_base);
+    __set_PRIMASK(mask);
+    return false;
+  }
+  target_angle[0] = cybergear_test_motion.target_rad;
+  cybergear_test_control_phase = 0U;
+  __HAL_TIM_SET_COUNTER(&htim6, 0U);
+  __HAL_TIM_CLEAR_FLAG(&htim6, TIM_FLAG_UPDATE);
+  HAL_NVIC_ClearPendingIRQ(TIM6_DAC_IRQn);
+  cybergear_base.first_cyclic = true;
+  cybergear_base.last_control_ms = HAL_GetTick();
+  cybergear_test_timer_active = true;
+  const HAL_StatusTypeDef timer_status = HAL_TIM_Base_Start_IT(&htim6);
+  if (timer_status != HAL_OK) cybergear_test_timer_active = false;
+  __set_PRIMASK(mask);
+  cybergear_test_console_flush();
+  printf("CG TEST: +/-%.2f, +/-%.2f deg; dwell=%lu ms\r\n",
+         (double)cybergear_test_tuning.amplitude_deg, (double)cybergear_test_tuning.small_amplitude_deg,
+         (unsigned long)cybergear_test_tuning.dwell_ms);
+  printf("CG TEST: current<=%.3f A speed<=%.3f rad/s wc=%.2f wo=%.2f\r\n",
+         (double)cybergear_test_tuning.motor.controller.current_limit_a,
+         (double)cybergear_test_tuning.motor.trajectory.velocity_max_rad_s,
+         (double)cybergear_test_tuning.motor.controller.bandwidth_rad_s,
+         (double)cybergear_test_tuning.motor.controller.observer_rad_s);
+  return timer_status == HAL_OK;
 }
 
 static void cybergear_standalone_test_run(void)
 {
-  printf("CG TEST: " CG_TEST_FIRMWARE_TAG "; homing then +/-%.2f, +/-%.2f deg\r\n",
-         (double)CG_TEST_AMPLITUDE_DEG, (double)CG_TEST_SMALL_AMPLITUDE_DEG);
-  printf("CG TEST: CAN1/RobStride disabled; motor=0x%02X host=0x%02X\r\n",
-         CYBER_GEAR_ID, HOST_ID);
-  if (!cybergear_base_init()) cybergear_test_halt("startup/config/feedback");
-  printf("CG TEST: homing started\r\n");
-  if (!cybergear_homing()) cybergear_test_halt("homing");
-  if (!cybergear_test_configure(&cybergear_base)) cybergear_test_halt("test config");
-  target_angle[0] = 0.0f;
-  if (!cybergear_start_position_adrc(&cybergear_base)) cybergear_test_halt("ADRC start");
-  cybergear_test_motion_init(&cybergear_test_motion, HAL_GetTick());
-  target_angle[0] = cybergear_test_motion.target_rad;
-  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK) cybergear_test_halt("timer start");
-  printf("CG TEST: homing complete; +%.2f, -%.2f, +%.2f, -%.2f deg; dwell=%lu ms\r\n",
-         (double)CG_TEST_AMPLITUDE_DEG, (double)CG_TEST_AMPLITUDE_DEG,
-         (double)CG_TEST_SMALL_AMPLITUDE_DEG, (double)CG_TEST_SMALL_AMPLITUDE_DEG,
-         (unsigned long)CG_TEST_DWELL_MS);
-  printf("CG TEST: ADRC current<=%.3f A, speed<=%.3f rad/s; %c/%c=stop\r\n",
-         (double)cybergear_base.config.controller.current_limit_a,
-         (double)cybergear_base.config.trajectory.velocity_max_rad_s,
-         CG_TEST_STOP_COMMAND, CG_TEST_STOP_COMMAND_UPPER);
-  printf("CG TEST: disturbance<=%.2f A, leak_mode=%u fixed_leak=%.3f /s\r\n",
-         (double)cybergear_base.config.controller.disturbance_limit_a,
-         (unsigned int)cybergear_base.config.controller.leak_mode,
-         (double)cybergear_base.config.controller.leak_fixed_s);
-  printf("CG TEST: wc=%.2f zeta=%.2f observer=%.2f rad/s\r\n",
-         (double)cybergear_base.config.controller.bandwidth_rad_s,
-         (double)cybergear_base.config.controller.damping_ratio,
-         (double)cybergear_base.config.controller.observer_rad_s);
+  const bool settings_valid = cybergear_tuning_defaults(&cybergear_test_tuning);
+  cybergear_test_console_init();
+  if (!settings_valid) printf("CG CONSOLE: invalid boot settings; start is blocked\r\n");
+  printf("CG TEST: " CG_TEST_FIRMWARE_TAG "; UART console ready; CAN1/RobStride disabled\r\n");
+  printf("CG CONSOLE: %c + Enter=start; %c=stop; set KEY VALUE / reinit / show / help + Enter\r\n",
+         CG_TEST_START_COMMAND, CG_TEST_STOP_COMMAND);
+  bool waiting = true;
+  bool running = false;
+  bool status_paused = false;
+  size_t show_index = cybergear_tuning_count();
+  static CyberGearConsoleCommand command;
   while (1)
   {
-    uint8_t command;
-    const bool stop_requested = HAL_UART_Receive(&huart2, &command, 1U, 0U) == HAL_OK &&
-        (command == CG_TEST_STOP_COMMAND || command == CG_TEST_STOP_COMMAND_UPPER);
-    /* Keep snapshot, target change and STOP request atomic with TIM6. */
-    const uint32_t mask = __get_PRIMASK();
+    uint32_t mask = __get_PRIMASK();
     __disable_irq();
-    const uint32_t now_ms = HAL_GetTick();
-    const bool fresh = cybergear_base.feedback.online &&
-        (uint32_t)(now_ms - cybergear_base.feedback.last_received_ms) <=
-        cybergear_base.config.controller.feedback_timeout_ms;
-    const bool trajectory_done = cybergear_test_trajectory_done();
-    const CyberGearTestResult result = cybergear_test_motion_update(&cybergear_test_motion,
-        now_ms, cybergear_base.state == CG_STATE_RUNNING && !stop_requested, fresh,
-        trajectory_done, cybergear_base.feedback.position_rad, cybergear_base.controller.velocity_rad_s);
-    if (result == CG_TEST_NEW_TARGET) target_angle[0] = cybergear_test_motion.target_rad;
-    else if (result >= CG_TEST_STOP_FAULT) cybergear_stop(&cybergear_base);
+    const CyberGearConsoleAction action = cybergear_console_poll(&cybergear_console, &command);
     __set_PRIMASK(mask);
-    if (result == CG_TEST_NEW_TARGET)
+    bool status_requested = status_paused && action != CG_CONSOLE_NONE;
+    bool halt_report = false;
+    if (action == CG_CONSOLE_STOP)
+    {
+      mask = __get_PRIMASK();
+      __disable_irq();
+      if (cybergear_test_initialized) cybergear_stop(&cybergear_base);
+      cybergear_test_motion.halted = true;
+      __set_PRIMASK(mask);
+      waiting = false;
+      running = false;
+      halt_report = true;
+      printf("CG CONSOLE: stopped; reinit or set required before another start\r\n");
+    }
+    else if (action == CG_CONSOLE_SET || action == CG_CONSOLE_REINIT)
+    {
+      cybergear_test_candidate = cybergear_test_tuning;
+      if (action == CG_CONSOLE_SET &&
+          !cybergear_tuning_set(&cybergear_test_candidate, command.key, command.value))
+        printf("CG CONSOLE: invalid setting; unchanged (show/help lists keys and limits)\r\n");
+      else
+      {
+        running = false;
+        waiting = cybergear_test_reinitialize(&cybergear_test_candidate);
+        status_paused = !waiting;
+        status_requested = false;
+        halt_report = !waiting;
+        if (!waiting) printf("CG CONSOLE: reinit failed; no restart\r\n");
+        else printf("CG CONSOLE: ready; send %c + Enter to home/start\r\n", CG_TEST_START_COMMAND);
+      }
+    }
+    else if (action == CG_CONSOLE_START)
+    {
+      if (!waiting || running) printf("CG CONSOLE: start rejected; reinit required or already running\r\n");
+      else
+      {
+        waiting = false;
+        running = cybergear_test_start();
+        status_paused = !running;
+        status_requested = false;
+        halt_report = !running;
+        if (!running)
+        {
+          mask = __get_PRIMASK();
+          __disable_irq();
+          if (cybergear_test_initialized) cybergear_request_reinitialize_stop(&cybergear_base);
+          cybergear_test_motion.halted = true;
+          __set_PRIMASK(mask);
+          cybergear_test_console_flush();
+          printf("CG CONSOLE: startup failed/stopped; reinit required\r\n");
+        }
+      }
+    }
+    else if (action == CG_CONSOLE_SHOW || action == CG_CONSOLE_HELP) show_index = 0U;
+    else if (action == CG_CONSOLE_INVALID) printf("CG CONSOLE: invalid/overflowed input discarded; use help + Enter\r\n");
+
+    if (running)
+    {
+      mask = __get_PRIMASK();
+      __disable_irq();
+      const uint32_t now_ms = HAL_GetTick();
+      const bool fresh = cybergear_base.feedback.online &&
+          now_ms - cybergear_base.feedback.last_received_ms <= cybergear_base.config.controller.feedback_timeout_ms;
+      const CyberGearTestResult result = cybergear_test_motion_update(&cybergear_test_motion,
+          now_ms, cybergear_base.state == CG_STATE_RUNNING, fresh, cybergear_test_trajectory_done(),
+          cybergear_base.feedback.position_rad, cybergear_base.controller.velocity_rad_s);
+      if (result == CG_TEST_NEW_TARGET) target_angle[0] = cybergear_test_motion.target_rad;
+      else if (result >= CG_TEST_STOP_FAULT)
+      {
+        cybergear_stop(&cybergear_base);
+        running = false;
+        halt_report = true;
+      }
+      __set_PRIMASK(mask);
+      if (result == CG_TEST_NEW_TARGET)
         printf("CG TEST: new target=%.4f rad\r\n", (double)cybergear_test_motion.target_rad);
-    else if (result >= CG_TEST_STOP_FAULT)
-        printf("CG TEST: halted reason=%u user_stop=%u; reset to retry\r\n",
-               (unsigned int)result, (unsigned int)stop_requested);
-    cybergear_service(&cybergear_base);
-    cybergear_test_status();
+      else if (result >= CG_TEST_STOP_FAULT)
+        printf("CG TEST: halted reason=%u; reinit required\r\n", (unsigned int)result);
+    }
+    if (halt_report)
+    {
+      status_paused = true;
+      status_requested = true;
+      show_index = cybergear_tuning_count();
+    }
+    if (cybergear_test_initialized)
+    {
+      if (!cybergear_test_timer_active && cybergear_base.managed)
+      {
+        mask = __get_PRIMASK();
+        __disable_irq();
+        cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
+        __set_PRIMASK(mask);
+      }
+      cybergear_service(&cybergear_base);
+      if (!status_paused && cybergear_base.fault != CG_FAULT_NONE)
+      {
+        running = false;
+        waiting = false;
+        cybergear_test_motion.halted = true;
+        status_paused = true;
+        status_requested = true;
+        show_index = cybergear_tuning_count();
+      }
+      if (status_requested) cybergear_test_status(true);
+      else if (!status_paused) cybergear_test_status(false);
+    }
+    if (show_index < cybergear_tuning_count())
+    {
+      printf("CG SET %s=%.6g %s\r\n", cybergear_tuning_key(show_index),
+             cybergear_tuning_value(&cybergear_test_tuning, show_index), cybergear_tuning_help(show_index));
+      show_index++;
+    }
     HAL_Delay(CG_TEST_LOOP_DELAY_MS);
   }
 }
-
 #endif
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
@@ -1085,8 +1341,16 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+#if APP_CYBERGEAR_STANDALONE_TEST
+  if (!cybergear_test_timer_active) return;
+#endif
   if (htim == &htim6 && (APP_CYBERGEAR_STANDALONE_TEST || motors_running)) {
+#if APP_CYBERGEAR_STANDALONE_TEST
+    uint8_t control_phase = (cybergear_test_control_phase + 1U) % 10U;
+    cybergear_test_control_phase = control_phase;
+#else
     static uint8_t control_phase = 0U;
+#endif
 
     /* CG can use phase 0/5. Other axes and the board reply retain all phases. */
     if (cybergear_control_phase_due(control_phase))
@@ -1176,12 +1440,6 @@ int main(void)
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
 #if APP_CYBERGEAR_STANDALONE_TEST
-  cybergear_test_wait_for_start();
-  if (motor_CAN_RxTxSettings_init(&motor_txheader) != HAL_OK)
-  {
-    Error_Handler();
-    return 1;
-  }
   cybergear_standalone_test_run();
 #else
   motor_CAN_txheader_init(&motor_txheader);

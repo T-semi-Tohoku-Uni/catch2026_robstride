@@ -66,5 +66,46 @@ void test_motion(void)
     assert(step(&motion, start, true, amplitude, 0.0f) == CG_TEST_WAIT);
     assert(step(&motion, start + 999U, true, amplitude, 0.0f) == CG_TEST_WAIT);
     assert(step(&motion, start + 1000U, true, amplitude, 0.0f) == CG_TEST_NEW_TARGET);
+
+    assert(cybergear_test_motion_init_settings(&motion, 100U, 30.0f, 2.0f, 200U, 3000U));
+    const float custom_targets[] = {
+        CYBERGEAR_DEG_TO_RAD(30.0f), -CYBERGEAR_DEG_TO_RAD(30.0f),
+        CYBERGEAR_DEG_TO_RAD(2.0f), -CYBERGEAR_DEG_TO_RAD(2.0f)
+    };
+    now_ms = 100U;
+    for (unsigned int index = 0U; index < 8U; ++index) {
+        assert(motion.target_rad == custom_targets[index % 4U]);
+        assert(step(&motion, now_ms, true, motion.target_rad, 0.0f) == CG_TEST_WAIT);
+        assert(step(&motion, now_ms + 199U, true, motion.target_rad, 0.0f) == CG_TEST_WAIT);
+        now_ms += 200U;
+        assert(step(&motion, now_ms, true, motion.target_rad, 0.0f) == CG_TEST_NEW_TARGET);
+        now_ms++;
+    }
+    assert(motion.completed_legs == 8U);
+    assert(cybergear_test_motion_init_settings(&motion, start, 30.0f, 2.0f, 200U, 3000U));
+    assert(step(&motion, start + 2999U, false, 0.0f, 0.0f) == CG_TEST_WAIT);
+    assert(step(&motion, start + 3000U, false, 0.0f, 0.0f) == CG_TEST_STOP_TIMEOUT);
+    assert(cybergear_test_motion_init_settings(&motion, 0U, 30.0f, 2.0f, 200U, 3000U));
+    assert(step(&motion, 1U, false, motion.amplitude_rad + CG_TEST_TRAVEL_GUARD_RAD + 0.01f,
+        0.0f) == CG_TEST_STOP_TRAVEL);
+    assert(cybergear_test_motion_init_settings(&motion, 0U, 30.0f, 2.0f, 200U, 3000U));
+    assert(step(&motion, 1U, false, -motion.amplitude_rad - CG_TEST_TRAVEL_GUARD_RAD - 0.01f,
+        0.0f) == CG_TEST_STOP_TRAVEL);
+
+    assert(!cybergear_test_motion_init_settings(NULL, 0U, 30.0f, 2.0f, 200U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, NAN, 2.0f, 200U, 3000U));
+    assert(motion.halted);
+    assert(step(&motion, 1U, true, 0.0f, 0.0f) == CG_TEST_WAIT);
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, INFINITY, 2.0f, 200U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, 30.0f, NAN, 200U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, 30.0f, 0.0f, 200U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, 30.0f, -2.0f, 200U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, 1.0f, 2.0f, 200U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, 30.0f, 2.0f, 0U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, 30.0f, 2.0f, 3000U, 3000U));
+    assert(!cybergear_test_motion_init_settings(&motion, 0U, 30.0f, 2.0f, 3001U, 3000U));
+    assert(cybergear_test_motion_init_settings(&motion, 0U, 2.0f, 2.0f, 200U, 3000U));
+    assert(!motion.halted && motion.completed_legs == 0U);
+    puts("Runtime motion settings: custom sequence, dwell, timeout, guard and invalid settings passed.");
     puts("Reciprocation: endpoints, dwell, fault latch, timeout, travel and tick wrap passed.");
 }

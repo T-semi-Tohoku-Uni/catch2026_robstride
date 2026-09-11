@@ -161,6 +161,7 @@ void cybergear_config_defaults(CyberGearConfig *config);
 bool cybergear_config_valid(const CyberGearConfig *config);
 bool cybergear_configure(CyberGearMotor *motor, const CyberGearConfig *config);
 bool cybergear_begin_position_control(CyberGearMotor *motor, CyberGearRunMode mode);
+bool cybergear_request_reinitialize_stop(CyberGearMotor *motor);
 bool cybergear_reset_fault(CyberGearMotor *motor); /* 明示操作専用。自動呼出し禁止。 */
 void cybergear_service(CyberGearMotor *motor);    /* main専用。CAN送信なし、計画のみ。 */
 void cybergear_set_posture(CyberGearMotor *motor, const CyberGearPostureSnapshot *posture);

@@ -5,6 +5,9 @@
 
 typedef struct {
     float target_rad;
+    float targets_rad[4];
+    float amplitude_rad;
+    uint32_t dwell_ms, leg_timeout_ms;
     uint32_t leg_started_ms, settled_since_ms, completed_legs;
     uint8_t target_index;
     bool settling, halted;
@@ -17,6 +20,8 @@ typedef enum {
 
 bool cybergear_test_configure(CyberGearMotor *motor);
 void cybergear_test_motion_init(CyberGearTestMotion *test, uint32_t now_ms);
+bool cybergear_test_motion_init_settings(CyberGearTestMotion *test, uint32_t now_ms,
+    float amplitude_deg, float small_deg, uint32_t dwell_ms, uint32_t leg_timeout_ms);
 /* Call with an atomic snapshot. Faults latch until explicit initialization. */
 CyberGearTestResult cybergear_test_motion_update(CyberGearTestMotion *test,
     uint32_t now_ms, bool running, bool fresh, bool trajectory_done,

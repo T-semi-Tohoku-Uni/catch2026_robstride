@@ -38,6 +38,10 @@ static MockRobstride robstride_handler[3];
 static FDCAN_HandleTypeDef hfdcan1;
 static FDCAN_TxHeaderTypeDef inter_board_txheader;
 static bool motors_running;
+#if APP_CYBERGEAR_STANDALONE_TEST
+static bool cybergear_test_timer_active = true;
+static uint8_t cybergear_test_control_phase;
+#endif
 static float target_angle[4] = {0.3f, 0.5f, -0.1f, 0.8f};
 static unsigned int cg_calls, rs_calls[3], board_calls;
 static float cg_target, rs_target[3], reported[4];

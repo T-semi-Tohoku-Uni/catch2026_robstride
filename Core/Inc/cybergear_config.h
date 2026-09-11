@@ -6,24 +6,134 @@
 /*
  * CyberGear 実機設定の入口
  * ======================
- * このファイルを編集して再ビルド・書込みすると反映される。UART からの設定変更ではない。
+ * このファイルは起動時の既定値。編集後に再ビルド・書込みすると反映される。
+ * 冒頭の重要パラメーターは単体試験中にUSART2からも変更できる（通常4軸運転は対象外）。
+ *   set current 2.5\n  : キーと値を空白で区切り、末尾に改行を送信する。
+ *   reinit\n           : 現在の設定を保持したまま停止・再初期化する。
+ *   s\n または S\n     : 再初期化後、原点探索と往復を開始する。
+ *   x または X        : 即時停止要求。開始とは異なり改行を待たない。
+ * 設定値を受理すると必ず安全停止を確認してから再初期化し、自動では再始動しない。
+ * 再設定後は再度開始指令が必要。不正値・整合しない組合せは拒否する。
+ * 原点探索中はx/Xの停止のみ受け付け、set/reinit等の入力は破棄する。
+ * UART変更はRAM内のみで、電源断/MCUリセットではこのヘッダーの既定値へ戻る。
  * 通常運転と単体試験の設定を集約し、初期値は集約前の動作値を維持している。
  * 実機の寸法・定格・電流の符号を推測して変更しない。NAN は「未設定」を表す。
  * 汎用制御ライブラリのホスト試験用既定値とは別に、実機の config_defaults へ適用する。
  *
  * まず変更する場所:
- *   試験 ON/OFF → 1、角度・待機・試験電流 → 2、到達性・振動 → 3、
- *   機械の許容範囲 → 4、軌道 → 5、保護停止 → 6、原点探索 → 7。
+ *   重要な調整値・上限 → 0、試験 ON/OFF・UART → 1、到達判定 → 2、
+ *   ADRC詳細 → 3、通信ID → 4、軌道詳細 → 5、時間監視 → 6、原点探索 → 7。
  * 既定の単体試験: +60 → -60 → +5 → -5 度、各点で1秒待機、
  *   電流上限3 A、軌道速度上限0.3 rad/s、観測器帯域6 rad/s、外乱補償上限1.5 A。
  * 到達条件は位置誤差0.5度以内・推定速度0.03 rad/s以下・軌道完了のまま。
  *
  * 注意: 試験電流・速度上限は原点探索後の ADRC に適用する。
- * 原点探索は別の速度制御であり、UART 停止文字も原点探索中は処理しない。
+ * 原点探索は別の速度制御であり、原点探索の速度は7節で指定する。
  * 0.3 rad/s は参照軌道の上限であり、実測速度の保護停止閾値ではない。
  * GPIO/CAN配線・クロック・TIM6レジスターはCubeMX側の設定を使用する。
  * 単体試験でもCyberGear通信用CAN3とPA0原点センサーは必要。CAN1/他軸は使用しない。
  */
+
+/* 0. 重要な調整値（コメントの UART キーで実行中にも変更可能）
+ * ---------------------------------------------------------------------
+ * 以下は初期値であり、UART変更でマクロやFlash自体が書き換わるわけではない。
+ * set は1項目ずつ検証する。依存関係のある値は成立する順に変更する。
+ * 例: 外乱割合を増やすなら先に reserve_fraction を増やす。
+ */
+
+/* UART: current [A]、speed [rad/s]。往復ADRCの総電流/参照軌道速度の上限。
+ * 起動時はmin(通常設定, 試験設定)。UARTでは指定値を使用するが、固定上限は超えられない。
+ * 電流増加は発熱・機械への力を増やす。試験電流上限は原点探索には作用しない。
+ * speedは実測速度の停止閾値ではなく、参照軌道の上限である。 */
+#define CG_TEST_CURRENT_LIMIT_A           5.0f
+#define CG_TEST_SPEED_RAD_S               0.8f
+
+/* UART: wc [rad/s]、zeta [無次元]。位置ゲインwc²、速度ゲイン2*zeta*wc。
+ * wcを上げると追従が速くなる一方、電流変動・振動が増え得る。
+ * zetaを上げると速度への減衰が強くなるが、目標付近の整定が遅くなる場合がある。 */
+#define CYBERGEAR_CONTROL_BANDWIDTH_RAD_S  8.0f
+#define CYBERGEAR_CONTROL_DAMPING_RATIO    1.0f
+/* UART: wo [rad/s]。位置/速度/外乱推定の試験用帯域。
+ * 起動時はmin(CYBERGEAR_OBSERVER_RAD_S, この値)。UARTでは固定上限内で指定可能。速度制限ではない。
+ * 6は遅延・ノイズによる電流変化率制限の持続を抑えるための既定値。
+ * 下げるとノイズ感度が下がる一方、負荷変化の推定も遅くなる。 */
+#define CG_TEST_OBSERVER_RAD_S            6.0f
+/* UART: b0 [rad/s²/A]。正方向電流に対する加速度ゲインの代表値。
+ * 符号・慣性を実機確認する。値だけを増やして到達性を保証するものではない。
+ * 下記B0_MIN/MAX内で設定し、軌道の電流予算には保守側のB0_MINを用いる。 */
+#define CYBERGEAR_B0_FIXED                 1.0
+
+/* UART: accel、brake [rad/s²]、jerk [rad/s³]。参照軌道の希望上限。
+ * 実効値はb0下限・電流/変化率予算からも抑制されるため、この値とは限らない。
+ * UARTからはこの起動時上限を超えて増やせない。引上げにはヘッダー変更と再ビルドが必要。
+ * 増加は加減速力・反転時の衝撃を増やし得る。brakeは実機停止距離の保証ではない。 */
+#define CYBERGEAR_TRAJECTORY_ACCEL_RAD_S2  2.0f
+#define CYBERGEAR_TRAJECTORY_BRAKE_RAD_S2  2.0f
+#define CYBERGEAR_TRAJECTORY_JERK_RAD_S3   8.0f
+/* UART: rise、fall [A/s]。符号付き指令電流の数値が増加/減少する速さの上限。
+ * 電流絶対値の増減ではない。総電流が3 A未満でも連続して掛かると飽和停止し得る。
+ * 予約変化率reserve_slewより大きい値が必要。大きくすると電流の急変を許す。 */
+#define CYBERGEAR_CURRENT_RISE_A_S         10.0f
+#define CYBERGEAR_CURRENT_FALL_A_S         10.0f
+
+/* UART: dist_fraction、reserve_fraction [0以上1未満]。
+ * 外乱補償上限=総電流×dist_fraction。既定は3 A×0.5=1.5 A。
+ * reserve_fractionは軌道生成から取り置く電流割合で、dist_fraction以上が必要。
+ * 両者を増やすと負荷保持の余地が増える一方、加減速用の電流が減る。
+ * 単体試験では通常のDISTURBANCE_LIMIT_A/予約割合をこの計算値で置き換える。 */
+#define CG_TEST_DISTURBANCE_CURRENT_FRACTION 0.5f
+#define CG_TEST_RESERVE_CURRENT_FRACTION   0.5f
+/* UART: dist_slew、reserve_slew [A/s]。
+ * dist_slewは補償電流の変化率上限、reserve_slewは軌道生成から取り置く変化率。
+ * reserve_slew < min(rise, fall) が必要。予約後の残りを軌道生成で使用する。 */
+#define CYBERGEAR_DISTURBANCE_SLEW_A_S     1.5f
+#define CYBERGEAR_DYNAMICS_RESERVE_SLEW_A_S 2.5f
+/* UART: gain [0..1]。推定外乱から補償電流への倍率。0は推定を残して補償のみ無効。
+ * UART: leak [1/s]。固定リーク係数。小さいほど負荷補償も誤推定も残りやすい。
+ * leakは試験既定の固定モードで作用する。誤差依存/無リークモードの詳細は3節。 */
+#define CYBERGEAR_COMPENSATION_GAIN        1.0f
+#define CYBERGEAR_LEAK_FIXED_S             0.03f
+
+/* UART: amp、small [度]。原点設定後の +amp → -amp → +small → -small を反復。
+ * 60度は片側振幅であり全幅120度。0 < small <= amp としソフト限界の内側に置く。
+ * 到達判定は2節に固定し、振幅変更では緩めない。実測位置の試験保護範囲もampに追従する。 */
+#define CG_TEST_AMPLITUDE_DEG              120.0f
+#define CG_TEST_SMALL_AMPLITUDE_DEG        5.0f
+/* UART: dwell_ms、leg_ms [ms、整数]。
+ * dwell_msは到達条件を連続して満たす時間。外れると待機をやり直す。
+ * leg_msは1目標の移動開始からの上限で待機時間も含む。0 < dwell_ms < leg_ms が必要。
+ * 振幅増加/速度低下時は所要時間との整合を確認。時間切れは到達扱いにしない。 */
+#define CG_TEST_DWELL_MS                   1000U
+#define CG_TEST_LEG_TIMEOUT_MS             30000U
+
+/* 0-B. 固定の上限・機械保護（UARTから変更不可、変更には再ビルドが必要）
+ * 通常の総電流上限[A]、参照軌道速度上限[rad/s]、観測器帯域上限[rad/s]。
+ * 単体試験はこれらを超えない。既定値は機械の許容値を保証するものではない。
+ * 通常4軸運転では上記の試験用設定ではなく、これらを直接使用する。 */
+#define CYBERGEAR_CURRENT_LIMIT_A          6.0f
+#define CYBERGEAR_TRAJECTORY_SPEED_RAD_S   1.5f
+#define CYBERGEAR_OBSERVER_RAD_S           10.0f
+/* UARTで許可するwc[rad/s]・減衰比・1区間時間[ms]の検査限界。
+ * 帯域/減衰比は上限以下、区間時間は上限未満。機構の安定性を保証する上限ではない。 */
+#define CG_TUNING_MAX_BANDWIDTH_RAD_S      20.0f
+#define CG_TUNING_MAX_DAMPING_RATIO        10.0f
+#define CG_TUNING_LEG_TIMEOUT_CEILING_MS   60000U
+/* 実測速度の停止閾値[rad/s]、温度の停止閾値[℃]。
+ * 26 rad/sは実測保護であり、軌道の0.3/0.4 rad/sとは用途が異なる。
+ * メーカー定格や連続運転の許容値を保証する初期値ではない。 */
+#define CYBERGEAR_SPEED_TRIP_RAD_S         26.0f
+#define CYBERGEAR_TEMPERATURE_TRIP_C       85.0f
+/* 原点設定後の出力軸座標[rad]。SOFTは目標/参照、HARDは実測位置の保護限界。
+ * HARD_MIN < SOFT_MIN < SOFT_MAX < HARD_MAX とし、通信範囲±12.5 rad内に置く。
+ * 既定値は機械端の実測を保証しない。試験のamp+3度の保護とは別に適用される。 */
+#define CYBERGEAR_SOFT_MIN_RAD             -6.28
+#define CYBERGEAR_SOFT_MAX_RAD             6.28
+#define CYBERGEAR_HARD_MIN_RAD             -12.5f
+#define CYBERGEAR_HARD_MAX_RAD             12.5f
+/* b0の上下限[rad/s²/A]。姿勢・荷物・モデル誤差を含め、実機に合わせて確認する。
+ * 軌道の電流予算にはMINを使う。到達性だけを見て無根拠に増やさない。 */
+#define CYBERGEAR_B0_MIN                   0.35
+#define CYBERGEAR_B0_MAX                   3.0
 
 /* 1. 起動モード・UART
  * 1=CyberGear単体試験、0=通常4軸運転。起動経路を #if で切り替える。
@@ -41,57 +151,38 @@
 #define CYBERGEAR_UART_BAUD_RATE           115200U
 #define CYBERGEAR_UART_TX_TIMEOUT_MS       10U
 
-/* 開始は次のいずれか1文字を正常受信した場合だけ。改行不要、無入力なら無期限待機。
- * 停止文字は往復中のみ有効。停止後の再開にはリセットと新たな開始指令が必要。
+/* 開始は次の文字と改行を受信した場合だけ。無入力なら無期限待機。
+ * 停止文字は改行を待たず処理する。再開には再初期化と新たな開始指令が必要。
  * 文字を変える場合は4つを重複させない。UPPER は別の受理文字であり自動変換ではない。 */
 #define CG_TEST_START_COMMAND             's'
 #define CG_TEST_START_COMMAND_UPPER       'S'
 #define CG_TEST_STOP_COMMAND              'x'
 #define CG_TEST_STOP_COMMAND_UPPER        'X'
-/* 開始待ちUART受信1回の待ち上限[ms]。自動開始までの時間ではない。 */
-#define CG_TEST_UART_START_POLL_MS         100U
-/* 定期診断の間隔[ms]。短くするとUART占有が増え、計画処理を遅らせる。 */
+/* コマンド1行と割込み受信リングの容量[byte]。終端領域も含む。
+ * 入力超過を許可するために保護を外さず、端末から1行ずつ送信する。 */
+#define CG_CONSOLE_LINE_CAPACITY           96U
+#define CG_CONSOLE_RX_CAPACITY             256U
+/* 定期診断の間隔[ms]。短くするとUART占有が増え、計画処理を遅らせる。
+ * 異常・開始失敗・停止時は間隔を待たず状況を1回出力し、以降の定期送信を停止する。
+ * 次のUART指示には応答する。show/helpは状況と設定を出力後、再び待機する。
+ * 再初期化成功後に定期送信を再開する。UART受信・CAN停止処理は継続する。 */
 #define CG_TEST_LOG_INTERVAL_MS            500U
 /* 往復ループ/停止確認ループの休止[ms]。制御ISR周期とは別。 */
 #define CG_TEST_LOOP_DELAY_MS              1U
 #define CG_TEST_STOP_POLL_MS               10U
 /* ログ識別子。数値は起動時に別途表示するため、調整のたびに名前を変える必要はない。 */
-#define CG_TEST_FIRMWARE_TAG               "CG_HEADER_CONFIG_V1"
+#define CG_TEST_FIRMWARE_TAG               "CG_UART_TUNING_V2"
 
-/* 2. 単体往復試験（通常運転には適用しない）
- * 度で編集する。RAD は内部用の換算値なので直接編集しない。
- * 0 < SMALL_AMPLITUDE_DEG <= AMPLITUDE_DEG とし、±振幅をソフト位置限界の内側に置く。
- * 原点設定後の出力軸角度。60度は片側振幅であり、全幅は120度。 */
+/* 2. 単体往復試験の詳細（通常運転には適用しない）
+ * 振幅・電流・速度・補償割合・待機時間の既定値は冒頭0節。
+ * RADは内部用の換算値なので直接編集しない。 */
 #define CYBERGEAR_DEG_TO_RAD(degrees)      ((degrees) * 0.01745329252f)
-#define CG_TEST_AMPLITUDE_DEG              60.0f
-#define CG_TEST_SMALL_AMPLITUDE_DEG        5.0f
 #define CG_TEST_AMPLITUDE_RAD              CYBERGEAR_DEG_TO_RAD(CG_TEST_AMPLITUDE_DEG)
 #define CG_TEST_SMALL_AMPLITUDE_RAD        CYBERGEAR_DEG_TO_RAD(CG_TEST_SMALL_AMPLITUDE_DEG)
-
-/* 往復時の総電流上限[A]と参照軌道速度上限[rad/s]。
- * 実効値=min(通常設定, 試験設定)。通常の上限を超えて引き上げる設定ではない。
- * 電流を上げる前に機械干渉・電源・発熱を確認する。原点探索の制限にはならない。 */
-#define CG_TEST_CURRENT_LIMIT_A           3.0f
-#define CG_TEST_SPEED_RAD_S               0.3f
-/* 観測器帯域の試験用上限[rad/s]。実効値=min(CYBERGEAR_OBSERVER_RAD_S, この値)。
- * 6は遅延・ノイズで電流変化率制限が持続するのを抑えるための設定。
- * 下げるとノイズへの反応は弱まるが、負荷変動の推定も遅くなる。速度上限ではない。 */
-#define CG_TEST_OBSERVER_RAD_S            6.0f
-/* 外乱補償に割り当てる総電流の割合[0以上1未満]。3 A × 0.5 = 1.5 A。
- * 試験では通常の DISTURBANCE_LIMIT_A をこの計算値で置き換える。
- * RESERVE は軌道生成から取り置く電流割合で、DISTURBANCE以上かつ1未満が必要。
- * 両方を増やすと負荷保持の余地が増える一方、軌道の加減速に使える電流が減る。 */
-#define CG_TEST_DISTURBANCE_CURRENT_FRACTION 0.5f
-#define CG_TEST_RESERVE_CURRENT_FRACTION   0.5f
 /* 試験では固定リークを使用。固定係数は共通の CYBERGEAR_LEAK_FIXED_S を参照。
  * 通常の LEAK_MODE と区別する。モードの意味は3節を参照。 */
 #define CG_TEST_LEAK_MODE                 CYBERGEAR_LEAK_FIXED
 
-/* 各目標で到達条件を連続して満たす必要がある時間[ms]。外れると待機をやり直す。
- * LEG_TIMEOUT は1目標の移動開始からの上限[ms]で、待機時間も含む。
- * 振幅増加・速度低下時は移動所要時間との整合を確認。時間切れは到達扱いにしない。 */
-#define CG_TEST_DWELL_MS                   1000U
-#define CG_TEST_LEG_TIMEOUT_MS             20000U
 /* 到達判定の実測位置誤差[度]と推定速度の絶対値[rad/s]。軌道完了も必須。
  * 到達性を上げるために判定を緩めず、まず補償・帯域・負荷を調整する。 */
 #define CG_TEST_REACHED_DEG                0.5f
@@ -111,23 +202,11 @@
 /* 制御呼出周期の許容ずれ[ms]、最後のフィードバックからの許容時間[ms]。 */
 #define CYBERGEAR_TIMING_TOLERANCE_MS      1U
 #define CYBERGEAR_FEEDBACK_TIMEOUT_MS      100U
-/* wc[rad/s]と減衰比zeta[無次元]。位置ゲインwc²、速度ゲイン2*zeta*wc。
- * wc増加は追従を速めるが電流変動・振動を増やし得る。zeta増加は速度への減衰を強める。
- * wo[rad/s]は位置/速度/外乱推定の帯域。上げると応答とノイズ感度がともに上がる。 */
-#define CYBERGEAR_CONTROL_BANDWIDTH_RAD_S  4.0f
-#define CYBERGEAR_CONTROL_DAMPING_RATIO    2.0f
-#define CYBERGEAR_OBSERVER_RAD_S           10.0f
-/* 符号付き電流の数値が増加/減少する速さの上限[A/s]。
- * 絶対値の増減ではない。最終電流が3 A未満でもここに連続して掛かると飽和停止し得る。 */
-#define CYBERGEAR_CURRENT_RISE_A_S         5.0f
-#define CYBERGEAR_CURRENT_FALL_A_S         5.0f
-/* 通常運転の外乱補償電流上限[A]、補償電流の変化率上限[A/s]、補償倍率[0..1]。
+/* 通常運転の外乱補償電流上限[A]。変化率上限/補償倍率は冒頭0節。
  * 上限不足では静止負荷を相殺できず誤差が残り得る。総電流上限内でのみ作用する。
  * 補償の予約電流（5節）を超えて設定できない。単体試験は上限だけ割合で上書きする。
- * GAIN=0では推定を継続したまま補償電流の寄与を無効にする。 */
+ */
 #define CYBERGEAR_DISTURBANCE_LIMIT_A      0.5f
-#define CYBERGEAR_DISTURBANCE_SLEW_A_S     1.0f
-#define CYBERGEAR_COMPENSATION_GAIN        1.0f
 /* 制御開始後に補償を抑える時間と、その後の立上げ時間[ms]。DELAYは0以上、RAMPは正。 */
 #define CYBERGEAR_COMPENSATION_DELAY_MS    100U
 #define CYBERGEAR_COMPENSATION_RAMP_MS     500U
@@ -139,51 +218,24 @@
  * NEAR/FARの誤差は最終目標との差ではなく、その時点の参照軌道との差。
  * NEAR_RAD < FAR_RADが必要。固定モードでも設定自体の妥当性検査は行う。 */
 #define CYBERGEAR_LEAK_MODE                CYBERGEAR_LEAK_LEGACY_ERROR
-#define CYBERGEAR_LEAK_FIXED_S             0.03f
 #define CYBERGEAR_LEAK_NEAR_S              0.5f
 #define CYBERGEAR_LEAK_FAR_S               0.03f
 #define CYBERGEAR_LEAK_NEAR_RAD            0.003f
 #define CYBERGEAR_LEAK_FAR_RAD             0.015f
 
-/* 4. 通信ID・機械保護範囲・入力ゲイン
+/* 4. 通信ID（機械保護範囲・入力ゲインは冒頭0節）
  * IDは実機と一致させる。HOST_IDはmain内の他軸通信でも共有する。
  * HARDWARE_CONFIRMED=0なら管理制御の起動を拒否する。全起動経路の非常停止ではない。
  * 1は安全性の自動確認を意味しない。各値は機構・負荷に合わせて実機確認が必要。 */
 #define CYBERGEAR_HOST_ID                  0xfeU
 #define CYBERGEAR_MOTOR_ID                 0x7fU
 #define CYBERGEAR_HARDWARE_CONFIRMED        1
-/* 原点設定後の出力軸座標[rad]。SOFTは目標/参照、HARDは実測位置の保護限界。
- * HARD_MIN < SOFT_MIN < SOFT_MAX < HARD_MAX とし、通信範囲±12.5 rad内に置く。
- * 既定値は機械端の実測を保証しない。試験の±63度保護とは別に適用される。 */
-#define CYBERGEAR_SOFT_MIN_RAD             -6.28
-#define CYBERGEAR_SOFT_MAX_RAD             6.28
-#define CYBERGEAR_HARD_MIN_RAD             -12.5f
-#define CYBERGEAR_HARD_MAX_RAD             12.5f
-/* 通常の総電流上限[A]、実測速度の停止閾値[rad/s]、温度の停止閾値[℃]。
- * 26 rad/sは実測保護値で、軌道の0.3/0.4 rad/sとは用途が異なる。
- * メーカー定格や連続運転の許容値を保証する初期値ではない。 */
-#define CYBERGEAR_CURRENT_LIMIT_A          6.0f
-#define CYBERGEAR_SPEED_TRIP_RAD_S         26.0f
-#define CYBERGEAR_TEMPERATURE_TRIP_C       85.0f
-/* 正方向電流に対する加速度のゲインb0[rad/s²/A]。符号が正であることを確認する。
- * FIXEDは代表値、MIN/MAXは姿勢・荷物・モデル誤差を含む上下限。
- * 軌道の電流予算にはMINを使う。到達性だけを見て無根拠に増やさない。 */
-#define CYBERGEAR_B0_FIXED                 1.0
-#define CYBERGEAR_B0_MIN                   0.35
-#define CYBERGEAR_B0_MAX                   3.0
 
-/* 5. 軌道生成・電流予算
- * 参照軌道の希望上限: 速度[rad/s]、加速/減速[rad/s²]、jerk[rad/s³]。
- * 実効加減速・jerkはb0下限と電流/変化率予算でも抑えるため、設定値とは限らない。 */
-#define CYBERGEAR_TRAJECTORY_SPEED_RAD_S   0.4f
-#define CYBERGEAR_TRAJECTORY_ACCEL_RAD_S2  1.0f
-#define CYBERGEAR_TRAJECTORY_BRAKE_RAD_S2  1.0f
-#define CYBERGEAR_TRAJECTORY_JERK_RAD_S3   5.0f
-/* 通常運転で補償用に取り置く電流割合[0以上1未満]と変化率[A/s]。
+/* 5. 軌道生成・電流予算（速度・加減速・jerk上限は冒頭0節）
+ * 通常運転で補償用に取り置く電流割合[0以上1未満]。予約変化率は冒頭0節。
  * 予約電流>=外乱補償上限、予約変化率<min(RISE,FALL)が必要。
- * 軌道用の電流/変化率は総予算から予約分を引いた残り。試験では割合を2節で上書き。 */
+ * 軌道用の電流/変化率は総予算から予約分を引いた残り。試験では割合を0節で上書き。 */
 #define CYBERGEAR_DYNAMICS_RESERVE_CURRENT_FRACTION 0.5f
-#define CYBERGEAR_DYNAMICS_RESERVE_SLEW_A_S 2.5f
 /* 軌道時間の探索範囲[s]。MAXが短すぎると要求した移動を計画できず拒否する。
  * TARGET_TOLERANCE[rad]は軌道計画の一致許容で、試験到達判定0.5度とは別。
  * SEARCH_ITERATIONSは探索回数（2～256）。増加は計画計算時間を増やす。 */
@@ -234,7 +286,7 @@
  * 反転後の移動量を指定する値ではない。CLEARANCEはセンサー端からの退避角[度]。 */
 #define CYBERGEAR_HOMING_FAST_SPEED_RAD_S  1.0f
 #define CYBERGEAR_HOMING_SLOW_SPEED_RAD_S  0.4f
-#define CYBERGEAR_HOMING_REVERSE_ANGLE_DEG 60.0f
+#define CYBERGEAR_HOMING_REVERSE_ANGLE_DEG 120.0f
 #define CYBERGEAR_HOMING_CLEARANCE_DEG     2.0f
 #define CYBERGEAR_HOMING_REVERSE_ANGLE_RAD CYBERGEAR_DEG_TO_RAD(CYBERGEAR_HOMING_REVERSE_ANGLE_DEG)
 #define CYBERGEAR_HOMING_CLEARANCE_RAD     CYBERGEAR_DEG_TO_RAD(CYBERGEAR_HOMING_CLEARANCE_DEG)

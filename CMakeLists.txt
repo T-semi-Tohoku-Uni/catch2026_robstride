@@ -75,6 +75,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_trajectory.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_dynamics.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_test_motion.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_tuning.c"
+    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_console.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/robstride_app.c"
 )
 

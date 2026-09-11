@@ -621,9 +621,8 @@ bool cybergear_process_rx(CyberGearMotor *m, const FDCAN_RxHeaderTypeDef *h, con
     return false;
 }
 
-static void cybergear_latch_fault(CyberGearMotor *m, CyberGearFault reason)
+static void cybergear_begin_stop(CyberGearMotor *m, CyberGearFault reason)
 {
-    if (m->state == CG_STATE_STOPPING || m->state == CG_STATE_FAULT) return;
     m->fault = reason;
     m->state = CG_STATE_STOPPING;
     m->managed = true;
@@ -638,6 +637,26 @@ static void cybergear_latch_fault(CyberGearMotor *m, CyberGearFault reason)
     m->prepared_ready = false;
     m->plan_generation++;
     cybergear_controller_invalidate_input(&m->controller);
+}
+
+static void cybergear_latch_fault(CyberGearMotor *m, CyberGearFault reason)
+{
+    if (m->state == CG_STATE_STOPPING || m->state == CG_STATE_FAULT) return;
+    cybergear_begin_stop(m, reason);
+}
+
+bool cybergear_request_reinitialize_stop(CyberGearMotor *motor)
+{
+    if (motor == NULL || motor->hfdcan == NULL) return false;
+    const uint32_t interrupt_mask = lock_state();
+    const CyberGearFault reason = motor->fault == CG_FAULT_NONE ?
+        CG_FAULT_REQUESTED_STOP : motor->fault;
+    cybergear_begin_stop(motor, reason);
+    motor->quiet_last_sequence = motor->feedback.rx_sequence;
+    motor->quiet_since_ms = 0U;
+    motor->internal_send = false;
+    __set_PRIMASK(interrupt_mask);
+    return true;
 }
 
 static bool feedback_fresh(const CyberGearMotor *m, uint32_t now)

@@ -740,6 +740,120 @@ static void standalone_loaded_motion_test(void)
     }
 }
 
+static void reinitialize_stop_confirmation_test(void)
+{
+    CyberGearMotor uninitialized = {0};
+    assert(!cybergear_request_reinitialize_stop(NULL));
+    assert(!cybergear_request_reinitialize_stop(&uninitialized));
+    for (unsigned int scenario = 0U; scenario < 3U; ++scenario) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        if (scenario == 0U) {
+            configure(&motor);
+            feedback(&motor, 2U, 0.1f, 0.2f, 25.0f, 0U);
+        } else {
+            start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+            if (scenario == 2U) {
+                normal_tick(&motor, NAN);
+                tick_ms += motor.config.stop_timeout_ms + 1U;
+                (void)cybergear_control_position_adrc(&motor, 0.0f);
+                assert(motor.state == CG_STATE_FAULT);
+                assert(!cybergear_reset_fault(&motor));
+            }
+        }
+        const CyberGearFault expected_fault = scenario == 2U ? CG_FAULT_TARGET : CG_FAULT_REQUESTED_STOP;
+        const CyberGearConfig previous_config = motor.config;
+        const uint32_t previous_generation = motor.plan_generation;
+        const unsigned int first_stop = tx_count;
+        motor.prepared_ready = true;
+        assert(cybergear_request_reinitialize_stop(&motor));
+        assert(motor.state == CG_STATE_STOPPING && motor.managed);
+        assert(motor.fault == expected_fault);
+        assert(memcmp(&motor.config, &previous_config, sizeof(previous_config)) == 0);
+        assert(motor.plan_generation == previous_generation + 1U);
+        assert(!motor.prepared_ready && !motor.controller.applied_current_valid);
+        assert(!motor.stop_queued && !motor.reset_confirmed && !motor.stationary);
+        assert(tx_count == first_stop);
+        assert(!cybergear_reset_fault(&motor));
+        (void)cybergear_control_position_adrc(&motor, 0.0f);
+        assert(motor.stop_queued && !motor.reset_confirmed);
+        assert(!cybergear_reset_fault(&motor));
+        tick_ms += motor.config.controller.period_ms;
+        feedback(&motor, 0U, 0.1f, 0.2f, 25.0f, 0U);
+        (void)cybergear_control_position_adrc(&motor, 0.0f);
+        assert(motor.reset_confirmed && !motor.stationary);
+        assert(!cybergear_reset_fault(&motor));
+        for (unsigned int sample = 0U; sample < 30U && motor.state != CG_STATE_FAULT; ++sample) {
+            tick_ms += motor.config.controller.period_ms;
+            feedback(&motor, 0U, 0.1f, 0.0f, 25.0f, 0U);
+            (void)cybergear_control_position_adrc(&motor, 0.0f);
+            assert(motor.fault == expected_fault);
+        }
+        assert(motor.state == CG_STATE_FAULT && motor.stationary && motor.reset_confirmed);
+        assert_only_stop_after(first_stop);
+        assert(cybergear_reset_fault(&motor));
+        assert(motor.state == CG_STATE_OFF && !motor.managed && motor.fault == CG_FAULT_NONE);
+        assert(memcmp(&motor.config, &previous_config, sizeof(previous_config)) == 0);
+        assert_only_stop_after(first_stop);
+    }
+}
+
+static void reinitialize_unconfirmed_stop_test(void)
+{
+    CyberGearMotor motor;
+    clear_mock(1000U);
+    start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+    feedback(&motor, 0U, 0.0f, 0.0f, 25.0f, 0U);
+    const unsigned int first_stop = tx_count;
+    assert(cybergear_request_reinitialize_stop(&motor));
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    tick_ms += motor.config.controller.feedback_timeout_ms + 1U;
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    assert(!motor.reset_confirmed && !motor.stationary);
+    assert(!cybergear_reset_fault(&motor));
+    tick_ms += motor.config.stop_timeout_ms;
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    assert(motor.state == CG_STATE_FAULT);
+    assert(!cybergear_reset_fault(&motor));
+
+    assert(cybergear_request_reinitialize_stop(&motor));
+    send_status = HAL_ERROR;
+    for (unsigned int sample = 0U; sample < 30U; ++sample) {
+        tick_ms += motor.config.controller.period_ms;
+        feedback(&motor, 0U, 0.0f, 0.0f, 25.0f, 0U);
+        (void)cybergear_control_position_adrc(&motor, 0.0f);
+        assert(!motor.stop_queued && !motor.reset_confirmed);
+        assert(!cybergear_reset_fault(&motor));
+    }
+    send_status = HAL_OK;
+    assert(cybergear_request_reinitialize_stop(&motor));
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    assert(motor.stop_queued && !motor.reset_confirmed && !motor.stationary);
+    for (unsigned int sample = 0U; sample < 30U && motor.state != CG_STATE_FAULT; ++sample) {
+        tick_ms += motor.config.controller.period_ms;
+        feedback(&motor, 0U, 0.0f, 0.0f, 25.0f, 1U);
+        (void)cybergear_control_position_adrc(&motor, 0.0f);
+        assert(!cybergear_reset_fault(&motor));
+    }
+    assert(motor.state == CG_STATE_FAULT && motor.reset_confirmed && motor.stationary);
+    bus_off = true;
+    tick_ms += motor.config.controller.period_ms;
+    feedback(&motor, 0U, 0.0f, 0.0f, 25.0f, 0U);
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    assert(!cybergear_reset_fault(&motor));
+    bus_off = false;
+    tick_ms += motor.config.controller.period_ms;
+    feedback(&motor, 0U, 0.0f, 0.0f, 25.0f, 0U);
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    tick_ms += motor.config.controller.feedback_timeout_ms + 1U;
+    assert(!cybergear_reset_fault(&motor));
+    tick_ms += motor.config.controller.period_ms;
+    feedback(&motor, 0U, 0.0f, 0.0f, 25.0f, 0U);
+    (void)cybergear_control_position_adrc(&motor, 0.0f);
+    assert(cybergear_reset_fault(&motor));
+    assert_only_stop_after(first_stop);
+}
+
 static void configuration_boundaries_test(void)
 {
     CyberGearConfig config = fixture();
@@ -750,6 +864,8 @@ static void configuration_boundaries_test(void)
 
 void test_driver(void)
 {
+    reinitialize_stop_confirmation_test();
+    reinitialize_unconfirmed_stop_test();
     configuration_boundaries_test();
     protocol_tests();
     startup_and_fault_tests();

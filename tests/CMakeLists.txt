@@ -11,8 +11,10 @@ option(CYBERGEAR_SANITIZERS "Require AddressSanitizer and UndefinedBehaviorSanit
 
 add_executable(cybergear_host_tests
     test_main.c driver_test.c trajectory_test.c controller_test.c dynamics_test.c controller_simulation.c test_motion.c
+    tuning_test.c console_test.c
     ../Core/Src/cybergear.c ../Core/Src/cybergear_controller.c
-    ../Core/Src/cybergear_dynamics.c ../Core/Src/cybergear_trajectory.c ../Core/Src/cybergear_test_motion.c)
+    ../Core/Src/cybergear_dynamics.c ../Core/Src/cybergear_trajectory.c ../Core/Src/cybergear_test_motion.c
+    ../Core/Src/cybergear_tuning.c ../Core/Src/cybergear_console.c)
 target_include_directories(cybergear_host_tests PRIVATE stubs ../Core/Inc)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(cybergear_host_tests PRIVATE
@@ -40,6 +42,12 @@ endif()
 add_test(NAME robstride_tx_isolation COMMAND robstride_tx_test)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME cybergear_console_fault_logging
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_console_fault_logging.py"
+        "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
+add_test(NAME cybergear_console_lifecycle
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_console_lifecycle.py"
+        "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
 add_test(NAME arm_toolchain_selection
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_arm_toolchain.py"
         "${CMAKE_COMMAND}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
@@ -101,7 +109,7 @@ add_test(NAME board_command_integration
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/check_board_commands.py"
         "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_SOURCE_DIR}/.." "${CMAKE_CURRENT_BINARY_DIR}")
 if(CYBERGEAR_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    set_tests_properties(cybergear_config_header cybergear_standalone_startup cybergear_standalone_commands cybergear_real_tim6_scheduler
+    set_tests_properties(cybergear_console_fault_logging cybergear_console_lifecycle cybergear_config_header cybergear_standalone_startup cybergear_standalone_commands cybergear_real_tim6_scheduler
         cybergear_real_fdcan3_dispatch motor_startup_integration board_command_integration
         PROPERTIES ENVIRONMENT "CATCH_HOST_SANITIZERS=1")
 endif()
