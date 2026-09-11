@@ -7,7 +7,7 @@ static bool feedback_healthy(const RobstrideFeedback *feedback, uint32_t now_ms)
 {
     return feedback->online && feedback->fault_flags == 0U &&
         isfinite(feedback->position_rad) &&
-        now_ms - feedback->last_leceived_ms < ROBSTRIDE_STARTUP_FEEDBACK_MS;
+        now_ms - feedback->last_leceived_ms <= ROBSTRIDE_STARTUP_FEEDBACK_MS;
 }
 
 static bool startup_valid(const RobstrideStartup *startup)

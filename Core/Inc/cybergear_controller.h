@@ -12,8 +12,8 @@ typedef enum {
 } CyberGearLeakMode;
 
 typedef struct {
-    uint32_t period_ms;             /* 固定計算周期 [ms]。10=100 Hz、5=200 Hz のみ。受信間隔を dt にしない。 */
-    uint32_t timing_tolerance_ms;   /* 実呼出し間隔と period_ms の差の許容 [ms]。超過は失敗。通常 1。 */
+    uint32_t period_ms;             /* 公称計算周期 [ms]。10=100 Hz、5=200 Hz のみ。予測には実経過時間を使う。 */
+    uint32_t timing_tolerance_ms;   /* 上位の周期判定で早い呼出しを許容する幅 [ms]。通常 1。 */
     uint32_t feedback_timeout_ms;   /* 新測定の最長許容 age [ms]。制動余裕から決める。 */
     float bandwidth_rad_s;         /* wc [rad/s]。位置剛性 wc²。移動速度ではなく誤差修正の帯域。 */
     float damping_ratio;           /* zeta [-]。速度項 2*zeta*wc。大きいほど過減衰になる。 */
@@ -77,7 +77,7 @@ typedef struct {
     float last_queued_current_a;
     float applied_current_estimate_a; /* キュー投入値を ZOH と仮定した近似。実電流測定ではない。 */
     float last_measured_position_rad;
-    float observer_position_gain;  /* 固定周期・wo から初期化時に算出。ISR 内で exp を再計算しない。 */
+    float observer_position_gain;  /* 公称周期・wo のゲイン。周期がずれた場合だけ実経過時間で再計算。 */
     float observer_velocity_gain;
     float observer_disturbance_gain;
     uint32_t last_control_timestamp_ms;
@@ -87,6 +87,7 @@ typedef struct {
     uint32_t rx_timestamp_ms;
     uint32_t start_timestamp_ms;
     uint32_t compensation_elapsed_ms; /* 飽和カウンタ。長時間運転の tick wrap でランプを再始動しない。 */
+    CyberGearControllerOutput last_output;
     bool initialized;
     bool applied_current_valid;
 } CyberGearController;
@@ -96,8 +97,9 @@ bool cybergear_controller_config_valid(const CyberGearControllerConfig *config);
 bool cybergear_controller_init(CyberGearController *controller,
     const CyberGearControllerConfig *config, float position_rad,
     float velocity_rad_s, uint32_t now_ms, uint32_t rx_sequence, uint32_t rx_timestamp_ms);
-/* 必ず period_ms ごとに呼ぶ。予測を旧 b0・最後の投入電流で行い、新測定を最大 1 回補正し、
- * その後 b0 を再表現する。false は入力/時刻/数値異常。出力を送らず上位で停止する。 */
+/* 公称 period_ms ごとに呼ぶ。実経過時間・旧 b0・最後の投入電流で予測し、
+ * 新測定を最大 1 回補正して b0 を再表現する。同一時刻は前回出力を返す。
+ * false は入力未確定、継続受信断、時刻逆転または数値異常。周期ずれだけでは失敗しない。 */
 bool cybergear_controller_step(CyberGearController *controller,
     const CyberGearControllerReference *reference,
     const CyberGearControllerMeasurement *measurement,

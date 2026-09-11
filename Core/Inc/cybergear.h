@@ -60,7 +60,8 @@ typedef struct
 
 typedef enum {
     CG_STATE_OFF, CG_STATE_WAIT_STOP, CG_STATE_WRITE_MODE, CG_STATE_WAIT_MODE,
-    CG_STATE_ZERO, CG_STATE_WAIT_RUN, CG_STATE_RUNNING, CG_STATE_STOPPING, CG_STATE_FAULT
+    CG_STATE_ZERO, CG_STATE_WAIT_RUN, CG_STATE_RUNNING, CG_STATE_STOPPING, CG_STATE_FAULT,
+    CG_STATE_STOPPED
 } CyberGearState;
 
 typedef enum {
@@ -94,10 +95,10 @@ typedef struct {
     uint32_t stationary_dwell_ms;     /* 新鮮なReset/Run feedbackで低速を保つ時間 [ms]。 */
     uint32_t startup_timeout_ms;      /* STOP→readback→ENABLE 全体の期限 [ms]。 */
     uint32_t command_retry_ms;        /* 起動read要求とSTOP再試行間隔 [ms]。共有バスを占有しない。 */
-    uint32_t stop_timeout_ms;         /* STOP再試行期限 [ms]。期限後FAULT、到達未確認はログに残る。 */
-    uint16_t stop_max_attempts;       /* STOPの最大投入試行回数。失敗も回数に含む。 */
+    uint32_t stop_timeout_ms;         /* 故障停止の確認待ち期限 [ms]。未確認なら期限後もSTOPを再送。 */
+    uint16_t stop_max_attempts;       /* 故障停止の確認待ち試行回数。通常停止の再送は打ち切らない。 */
     uint32_t planner_lead_ms;         /* mainで将来状態から計画する先行時間 [ms]。周期の整数倍。 */
-    uint32_t planner_timeout_ms;      /* 新目標の計画が有効にならない最長時間 [ms]。 */
+    uint32_t planner_timeout_ms;      /* 新目標が未反映のまま復帰・再計画へ移る時間 [ms]。 */
     float operation_kp, operation_kd; /* 比較用の内蔵PD。Kp [Nm/rad]、Kd [Nm s/rad]。未設定NAN。 */
     float operation_torque_limit_nm; /* 比較用トルク上限レジスタ [Nm]。FW適用確認が必要。 */
 } CyberGearConfig;
@@ -107,6 +108,8 @@ typedef struct {
     uint32_t timestamp_ms, rx_sequence, rx_age_ms, control_dt_ms;
     CyberGearState state;
     CyberGearFault fault;
+    CyberGearFault recovery_reason;
+    uint32_t recovery_count, planner_failures, planner_deadline_misses, planner_compute_ms;
     float target_rad, qd, vd, ad, q, v_feedback, z1, z2, z3;
     float i_track, i_dist, i_req, i_cmd, b0, b0_rate;
     float accel_limit, brake_limit, jerk_limit, posture_index;
@@ -118,7 +121,7 @@ typedef struct {
     bool applied_estimate_valid, stop_queued, reset_confirmed, stationary;
 } CyberGearLog;
 
-#define CYBERGEAR_LOG_CAPACITY 32U /* 約320 ms @100Hz。満杯時drop、制御を待たせない。 */
+#define CYBERGEAR_LOG_CAPACITY 32U /* 約320 ms @100Hz。満杯時は最古の記録を置換する。 */
 
 typedef struct
 {
@@ -146,7 +149,12 @@ typedef struct
     uint32_t quiet_since_ms, quiet_last_sequence;
     uint32_t tracking_since_ms, saturation_since_ms, stall_since_ms;
     uint32_t recovery_count, recovery_started_ms;
+    CyberGearFault recovery_reason;
     bool recovery_zero_active;
+    uint32_t planner_lead_ms, planner_attempts, planner_failures, planner_deadline_misses;
+    uint32_t planner_compute_ms, planner_max_compute_ms, ignored_targets;
+    uint32_t tx_failure_since_ms, mode_mismatch_since_ms;
+    bool tx_failure_active, mode_mismatch_active;
     float requested_target_rad, stall_start_rad;
     bool managed, internal_send, prepared_ready, planning_fault, quiet_active, first_cyclic;
     bool tracking_active, saturation_active, stall_active;
@@ -158,6 +166,8 @@ typedef struct
     uint32_t tx_queued, tx_failed, tx_fifo_free, tec, rec;
     bool bus_off;
     CyberGearLog latest_log; /* Ring fullでも最新状態を保持。停止理由を古いログに埋もれさせない。 */
+    CyberGearLog fault_log;
+    bool fault_log_valid;
     CyberGearLog logs[CYBERGEAR_LOG_CAPACITY];
     uint32_t log_head, log_tail, log_drops;
 } CyberGearMotor;

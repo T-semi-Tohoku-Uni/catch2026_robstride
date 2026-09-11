@@ -16,6 +16,7 @@
 #define CYBERGEAR_TORQUE_MAX_NM           (12.0f)
 
 static void cybergear_latch_fault(CyberGearMotor *motor, CyberGearFault reason);
+static void cybergear_begin_stop(CyberGearMotor *motor, CyberGearFault reason);
 
 static uint32_t cybergear_make_can_id(
 	CyberGearCommunicationType communication_type,
@@ -197,18 +198,20 @@ bool cybergear_enable(CyberGearMotor *motor)
 {
 	if (motor == NULL || (motor->managed && !motor->internal_send) ||
 		!cybergear_config_valid(&motor->config)) return false;
-	return cybergear_send_empty_command(
+	const bool queued = cybergear_send_empty_command(
 		motor,
 		CYBERGEAR_COMM_ENABLE,
 		0
 	);
+	if (queued && motor->state == CG_STATE_STOPPED) motor->state = CG_STATE_OFF;
+	return queued;
 }
 
 bool cybergear_stop(CyberGearMotor *motor)
 {
 	if (motor == NULL) return false;
 	if (motor->managed && !motor->internal_send) {
-		cybergear_latch_fault(motor, CG_FAULT_REQUESTED_STOP);
+		cybergear_begin_stop(motor, CG_FAULT_NONE);
 		return true; /* Request accepted. STOP delivery is tracked separately. */
 	}
 
@@ -572,7 +575,8 @@ bool cybergear_config_valid(const CyberGearConfig *c)
 
 bool cybergear_configure(CyberGearMotor *m, const CyberGearConfig *c)
 {
-    if (m == NULL || m->managed || m->state != CG_STATE_OFF || !cybergear_config_valid(c)) return false;
+    if (m == NULL || m->managed || (m->state != CG_STATE_OFF && m->state != CG_STATE_STOPPED) ||
+        !cybergear_config_valid(c)) return false;
     m->config = *c;
     return true;
 }
@@ -625,7 +629,7 @@ bool cybergear_process_rx(CyberGearMotor *m, const FDCAN_RxHeaderTypeDef *h, con
     return false;
 }
 
-static void cybergear_latch_fault(CyberGearMotor *m, CyberGearFault reason)
+static void cybergear_begin_stop(CyberGearMotor *m, CyberGearFault reason)
 {
     if (m->state == CG_STATE_STOPPING || m->state == CG_STATE_FAULT) return;
     m->fault = reason;
@@ -645,9 +649,25 @@ static void cybergear_latch_fault(CyberGearMotor *m, CyberGearFault reason)
     cybergear_controller_invalidate_input(&m->controller);
 }
 
+static void cybergear_latch_fault(CyberGearMotor *motor, CyberGearFault reason)
+{
+    cybergear_begin_stop(motor, reason);
+}
+
 static bool feedback_fresh(const CyberGearMotor *m, uint32_t now)
 {
     return m->feedback.online && now - m->feedback.last_received_ms <= m->config.controller.feedback_timeout_ms;
+}
+
+static bool measurement_usable(const CyberGearMotor *motor)
+{
+    const uint32_t sequence_delta = motor->feedback.rx_sequence - motor->controller.rx_sequence;
+    const uint32_t received_delta = motor->feedback.last_received_ms - motor->controller.rx_timestamp_ms;
+    if (sequence_delta == 0U) return received_delta == 0U;
+    if (sequence_delta >= UINT32_C(0x80000000) || received_delta >= UINT32_C(0x80000000)) return false;
+    const float maximum_jump = motor->config.position_jump_rad +
+        motor->config.speed_trip_rad_s * (float)received_delta * 0.001f;
+    return fabsf(motor->feedback.position_rad - motor->controller.last_measured_position_rad) <= maximum_jump;
 }
 
 static bool quiet_feedback(CyberGearMotor *m, uint32_t now, uint8_t mode)
@@ -668,17 +688,18 @@ static void service_stop(CyberGearMotor *m, uint32_t now)
     if (m->stop_queued && m->feedback.rx_sequence != m->stop_rx_sequence &&
         feedback_fresh(m, now) && m->feedback.mode == 0U) m->reset_confirmed = true;
     m->stationary = quiet_feedback(m, now, 0U);
-    if (m->state == CG_STATE_FAULT) return;
-    if ((m->reset_confirmed && m->stationary) || now - m->stop_started_ms >= m->config.stop_timeout_ms ||
-        m->stop_attempts >= m->config.stop_max_attempts) {
-        m->state = CG_STATE_FAULT;
+    if (m->reset_confirmed && m->stationary) {
+        m->state = m->fault == CG_FAULT_NONE ? CG_STATE_STOPPED : CG_STATE_FAULT;
+        if (m->state == CG_STATE_STOPPED) m->managed = false;
         return;
     }
+    if (m->fault != CG_FAULT_NONE && (now - m->stop_started_ms >= m->config.stop_timeout_ms ||
+        m->stop_attempts >= m->config.stop_max_attempts)) m->state = CG_STATE_FAULT;
     if (m->stop_attempts == 0U || now - m->last_command_ms >= m->config.command_retry_ms) {
         m->internal_send = true;
         const bool queued = cybergear_stop(m);
         m->internal_send = false;
-        m->stop_attempts++;
+        if (m->stop_attempts < UINT32_MAX) m->stop_attempts++;
         m->last_command_ms = now;
         if (queued && !m->stop_queued) m->stop_rx_sequence = m->feedback.rx_sequence;
         m->stop_queued = m->stop_queued || queued;
@@ -695,6 +716,7 @@ bool cybergear_reset_fault(CyberGearMotor *m)
     if (ready) {
         m->state = CG_STATE_OFF;
         m->fault = CG_FAULT_NONE;
+        m->fault_log_valid = false;
         m->managed = false;
         m->motor_fault_sequence = 0;
         memset(m->fault_payload, 0, sizeof(m->fault_payload));
@@ -705,7 +727,8 @@ bool cybergear_reset_fault(CyberGearMotor *m)
 
 bool cybergear_begin_position_control(CyberGearMotor *m, CyberGearRunMode mode)
 {
-    if (m == NULL || m->hfdcan == NULL || m->managed || m->state != CG_STATE_OFF) return false;
+    if (m == NULL || m->hfdcan == NULL || m->managed ||
+        (m->state != CG_STATE_OFF && m->state != CG_STATE_STOPPED)) return false;
     if (!cybergear_config_valid(&m->config)) { cybergear_latch_fault(m, CG_FAULT_CONFIG); return false; }
     if (mode != CYBERGEAR_RUN_MODE_CURRENT && mode != CYBERGEAR_RUN_MODE_OPERATION) return false;
     if (mode == CYBERGEAR_RUN_MODE_OPERATION &&
@@ -726,6 +749,9 @@ bool cybergear_begin_position_control(CyberGearMotor *m, CyberGearRunMode mode)
     m->stop_queued = false;
     m->plan_generation++;
     m->stop_attempts = 0U;
+    m->tx_failure_active = false;
+    m->mode_mismatch_active = false;
+    m->fault_log_valid = false;
     return true;
 }
 
@@ -737,14 +763,14 @@ static void enter_state(CyberGearMotor *m, CyberGearState state, uint32_t now)
 
 static bool begin_running(CyberGearMotor *m, uint32_t now)
 {
-    if (m->feedback.position_rad < m->config.trajectory.position_min_rad ||
-        m->feedback.position_rad > m->config.trajectory.position_max_rad) return false;
+    if (m->feedback.position_rad <= m->config.hard_min_rad ||
+        m->feedback.position_rad >= m->config.hard_max_rad) return false;
     if (!cybergear_dynamics_init(&m->dynamics, &m->config.dynamics) ||
         !cybergear_dynamics_step(&m->dynamics, &m->posture, now,
-            (float)m->config.controller.period_ms * 0.001f, &m->dynamics_output) ||
-        m->dynamics_output.status == CYBERGEAR_MODEL_STALE ||
-        m->dynamics_output.status == CYBERGEAR_MODEL_INVALID) return false;
+            (float)m->config.controller.period_ms * 0.001f, &m->dynamics_output)) return false;
     m->effective_limits = m->config.trajectory;
+    m->effective_limits.position_min_rad = fminf(m->config.trajectory.position_min_rad, m->feedback.position_rad);
+    m->effective_limits.position_max_rad = fmaxf(m->config.trajectory.position_max_rad, m->feedback.position_rad);
     m->effective_limits.acceleration_max_rad_s2 = fminf(m->effective_limits.acceleration_max_rad_s2, m->dynamics_output.acceleration_rad_s2);
     m->effective_limits.braking_max_rad_s2 = fminf(m->effective_limits.braking_max_rad_s2, m->dynamics_output.braking_rad_s2);
     m->effective_limits.jerk_max_rad_s3 = fminf(m->effective_limits.jerk_max_rad_s3, m->dynamics_output.jerk_rad_s3);
@@ -756,13 +782,16 @@ static bool begin_running(CyberGearMotor *m, uint32_t now)
     m->trajectory_start_ms = now;
     m->last_control_ms = now;
     m->first_cyclic = true;
-    m->requested_target_rad = origin.q_rad;
+    m->requested_target_rad = fminf(m->config.trajectory.position_max_rad,
+        fmaxf(m->config.trajectory.position_min_rad, origin.q_rad));
     m->requested_since_ms = now;
     m->prepared_ready = false;
     m->planning_fault = false;
     m->tracking_active = false;
     m->saturation_active = false;
     m->recovery_count = 0U;
+    m->recovery_reason = CG_FAULT_NONE;
+    m->planner_lead_ms = m->config.planner_lead_ms;
     m->recovery_zero_active = false;
     m->recovery_started_ms = 0U;
     m->stall_active = false;
@@ -788,13 +817,17 @@ static void startup_step(CyberGearMotor *m, uint32_t now)
         }
         break;
     case CG_STATE_WRITE_MODE:
+        if (!due) break;
         ok = cybergear_set_run_mode(m, m->requested_mode);
         if (ok) { enter_state(m, CG_STATE_WAIT_MODE, now); m->last_command_ms = now; }
         break;
     case CG_STATE_WAIT_MODE:
         if (m->mode_read_valid && m->mode_read_sequence != m->mode_request_sequence) {
             if (m->mode_read_value != (uint8_t)m->requested_mode) {
-                cybergear_latch_fault(m, CG_FAULT_MODE); break;
+                m->mode_read_valid = false;
+                m->mode_read_pending = false;
+                enter_state(m, CG_STATE_WRITE_MODE, now);
+                break;
             }
             m->mode_read_pending = false;
             enter_state(m, CG_STATE_ZERO, now);
@@ -838,18 +871,21 @@ static void startup_step(CyberGearMotor *m, uint32_t now)
     default: break;
     }
     m->internal_send = false;
-    if (!ok) cybergear_latch_fault(m, CG_FAULT_TX);
+    if (!ok) m->last_command_ms = now;
 }
 
 static void record_log(CyberGearMotor *m, uint32_t now, uint32_t dt)
 {
     const bool full = m->log_head - m->log_tail >= CYBERGEAR_LOG_CAPACITY;
-    if (full) m->log_drops++;
+    if (full) { m->log_drops++; m->log_tail++; }
     CyberGearLog *l = &m->latest_log;
     *l = (CyberGearLog){
         .timestamp_ms=now, .rx_sequence=m->feedback.rx_sequence,
         .rx_age_ms=now-m->feedback.last_received_ms, .control_dt_ms=dt,
         .state=m->state, .fault=m->fault, .target_rad=m->requested_target_rad,
+        .recovery_reason=m->recovery_reason, .recovery_count=m->recovery_count,
+        .planner_failures=m->planner_failures, .planner_deadline_misses=m->planner_deadline_misses,
+        .planner_compute_ms=m->planner_compute_ms,
         .qd=m->trajectory.point.q_rad, .vd=m->trajectory.point.v_rad_s, .ad=m->trajectory.point.a_rad_s2,
         .q=m->feedback.position_rad, .v_feedback=m->feedback.velocity_rad_s,
         .z1=m->controller.position_rad, .z2=m->controller.velocity_rad_s, .z3=m->controller.disturbance_rad_s2,
@@ -867,7 +903,10 @@ static void record_log(CyberGearMotor *m, uint32_t now, uint32_t dt)
         .bus_off=m->bus_off, .applied_estimate_valid=m->controller.applied_current_valid,
         .stop_queued=m->stop_queued, .reset_confirmed=m->reset_confirmed, .stationary=m->stationary
     };
-    if (full) return;
+    if (m->fault != CG_FAULT_NONE && !m->fault_log_valid) {
+        m->fault_log = *l;
+        m->fault_log_valid = true;
+    }
     m->logs[m->log_head % CYBERGEAR_LOG_CAPACITY] = *l;
     m->log_head++;
 }
@@ -900,8 +939,11 @@ void cybergear_service(CyberGearMotor *m)
     CgTrajectoryLimits limits = m->effective_limits;
     const float target = m->requested_target_rad;
     const uint32_t generation = m->plan_generation;
-    const uint32_t activation = m->last_control_ms + m->config.planner_lead_ms;
+    const uint32_t control_ms = m->last_control_ms;
+    const uint32_t activation = control_ms + m->planner_lead_ms;
     const uint32_t previous_start = m->trajectory_start_ms;
+    const uint32_t started_ms = HAL_GetTick();
+    m->planner_attempts++;
     __set_PRIMASK(mask);
     /* Polynomial/root searches occur here in main, never in the timer ISR.
      * Evaluate the OLD curve at a future activation instant; new q/v/a match
@@ -911,10 +953,27 @@ void cybergear_service(CyberGearMotor *m)
     const bool ok = cg_trajectory_evaluate(&previous, (double)(activation - previous_start) * 0.001, &point) &&
         cg_trajectory_reset(&candidate, &point, &limits) && cg_trajectory_plan(&candidate, target, &limits);
     mask = lock_state();
-    if (m->state == CG_STATE_RUNNING && !m->recovery_zero_active && m->plan_generation == generation &&
-        !time_reached(HAL_GetTick(), activation)) {
-        if (ok) { m->prepared = candidate; m->prepared_start_ms = activation; m->prepared_ready = true; }
-        else m->planning_fault = true;
+    const uint32_t finished_ms = HAL_GetTick();
+    m->planner_compute_ms = finished_ms - started_ms;
+    if (m->planner_compute_ms > m->planner_max_compute_ms) m->planner_max_compute_ms = m->planner_compute_ms;
+    if (m->state == CG_STATE_RUNNING && !m->recovery_zero_active && m->plan_generation == generation) {
+        if (!ok) {
+            m->planner_failures++;
+            m->planning_fault = true;
+        } else if (time_reached(finished_ms, activation)) {
+            m->planner_deadline_misses++;
+            const uint32_t period = m->config.controller.period_ms;
+            const uint32_t maximum = m->config.planner_timeout_ms - period;
+            uint32_t needed = finished_ms - control_ms;
+            needed = maximum > 2U * period && needed < maximum - 2U * period ? needed + 2U * period : maximum;
+            needed = ((needed + period - 1U) / period) * period;
+            if (needed > maximum) needed = (maximum / period) * period;
+            if (needed > m->planner_lead_ms) m->planner_lead_ms = needed;
+        } else {
+            m->prepared = candidate;
+            m->prepared_start_ms = activation;
+            m->prepared_ready = true;
+        }
     }
     __set_PRIMASK(mask);
 }
@@ -924,6 +983,21 @@ static bool timed_condition(bool condition, bool *active, uint32_t *since, uint3
     if (!condition) { *active = false; return false; }
     if (!*active) { *active = true; *since = now; }
     return now - *since >= timeout;
+}
+
+static void begin_recovery(CyberGearMotor *motor, CyberGearFault reason, uint32_t now_ms)
+{
+    motor->planning_fault = false;
+    if (motor->recovery_zero_active) return;
+    motor->recovery_reason = reason;
+    motor->recovery_started_ms = now_ms;
+    motor->recovery_zero_active = true;
+    motor->prepared_ready = false;
+    motor->plan_generation++;
+    motor->tracking_active = false;
+    motor->saturation_active = false;
+    motor->stall_active = false;
+    if (motor->recovery_count < UINT32_MAX) motor->recovery_count++;
 }
 
 static CyberGearFault running_protection(CyberGearMotor *m, uint32_t now)
@@ -943,25 +1017,19 @@ static CyberGearFault running_protection(CyberGearMotor *m, uint32_t now)
         } else if (now - m->stall_since_ms >= c->stall_timeout_ms) return CG_FAULT_STALL;
     } else m->stall_active = false;
     if (tracking || saturated) {
-        if (tracking && (!c->recover_on_tracking || m->requested_mode != CYBERGEAR_RUN_MODE_CURRENT))
+        if (tracking && !c->recover_on_tracking)
             return CG_FAULT_TRACKING;
-        if (saturated && (!c->recover_on_saturation || m->requested_mode != CYBERGEAR_RUN_MODE_CURRENT))
+        if (saturated && !c->recover_on_saturation)
             return CG_FAULT_SATURATION;
-        m->recovery_started_ms = now;
-        m->recovery_zero_active = true;
-        m->prepared_ready = false;
-        m->plan_generation++;
-        m->tracking_active = false;
-        m->saturation_active = false;
-        m->stall_active = false;
-        if (m->recovery_count < UINT32_MAX) m->recovery_count++;
+        begin_recovery(m, tracking ? CG_FAULT_TRACKING : CG_FAULT_SATURATION, now);
     }
     return CG_FAULT_NONE;
 }
 
 bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
 {
-    if (m == NULL || !m->managed) return false;
+    if (m == NULL) return false;
+    if (!m->managed) return m->state == CG_STATE_STOPPED;
     const uint32_t now = HAL_GetTick();
     const uint32_t elapsed = now - m->last_control_ms;
     FDCAN_ProtocolStatusTypeDef bus;
@@ -973,8 +1041,15 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
         m->tec = counters.TxErrorCnt; m->rec = counters.RxErrorCnt;
     }
     if (m->state == CG_STATE_STOPPING || m->state == CG_STATE_FAULT) {
-        service_stop(m, now); record_log(m, now, elapsed); return false;
+        if (m->fault == CG_FAULT_NONE && (m->motor_fault_sequence != 0U || m->feedback.fault_flags != 0U))
+            m->fault = CG_FAULT_MOTOR;
+        service_stop(m, now); record_log(m, now, elapsed); return m->fault == CG_FAULT_NONE;
     }
+    if (!isfinite(target)) { target = m->requested_target_rad; m->ignored_targets++; }
+    const float bounded_target = fminf(m->config.trajectory.position_max_rad,
+        fmaxf(m->config.trajectory.position_min_rad, target));
+    if (bounded_target != target) m->ignored_targets++;
+    target = bounded_target;
     if (m->motor_fault_sequence != 0U || (m->feedback.online && m->feedback.fault_flags != 0U)) {
         cybergear_latch_fault(m, CG_FAULT_MOTOR);
     } else if (m->feedback.online && (!isfinite(m->feedback.position_rad) ||
@@ -988,28 +1063,35 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
         startup_step(m, now);
     } else if (!feedback_fresh(m, now)) {
         cybergear_latch_fault(m, CG_FAULT_FEEDBACK);
-    } else if (m->feedback.mode != 2U || !m->mode_read_valid || m->mode_read_value != (uint8_t)m->requested_mode) {
-        cybergear_latch_fault(m, CG_FAULT_MODE);
-    } else if (!isfinite(target) || target < m->config.trajectory.position_min_rad ||
-        target > m->config.trajectory.position_max_rad) {
-        cybergear_latch_fault(m, CG_FAULT_TARGET);
     } else if (m->feedback.position_rad <= m->config.hard_min_rad || m->feedback.position_rad >= m->config.hard_max_rad) {
         cybergear_latch_fault(m, CG_FAULT_POSITION);
-    } else if (elapsed > 0U) {
-        const uint32_t period = m->config.controller.period_ms;
-        const uint32_t tolerance = m->config.controller.timing_tolerance_ms;
-        if (m->first_cyclic && elapsed < period) goto done;
-        const uint32_t difference = elapsed > period ? elapsed-period : period-elapsed;
-        if (difference > tolerance) { cybergear_latch_fault(m, CG_FAULT_TIMING); goto done; }
-        m->first_cyclic = false;
-        if (m->feedback.rx_sequence != m->controller.rx_sequence) {
-            const uint32_t rx_dt = m->feedback.last_received_ms - m->controller.rx_timestamp_ms;
-            const float max_jump = m->config.position_jump_rad + m->config.speed_trip_rad_s * (float)rx_dt * 0.001f;
-            if (rx_dt > m->config.controller.feedback_timeout_ms ||
-                fabsf(m->feedback.position_rad - m->controller.last_measured_position_rad) > max_jump) {
-                cybergear_latch_fault(m, CG_FAULT_POSITION); goto done;
+    } else if (m->feedback.mode != 2U || !m->mode_read_valid || m->mode_read_value != (uint8_t)m->requested_mode) {
+        if (timed_condition(true, &m->mode_mismatch_active, &m->mode_mismatch_since_ms,
+            now, m->config.controller.feedback_timeout_ms)) cybergear_latch_fault(m, CG_FAULT_MODE);
+        else if (now - m->last_command_ms >= m->config.command_retry_ms) {
+            m->internal_send = true;
+            const bool queued = m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT ? cybergear_set_current(m, 0.0f) :
+                cybergear_control(m, m->feedback.position_rad, 0.0f, 0.0f, 0.0f, 0.0f);
+            m->internal_send = false;
+            m->last_command_ms = now;
+            if (queued && m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT &&
+                ((measurement_usable(m) && !cybergear_controller_init(&m->controller, &m->config.controller,
+                    m->feedback.position_rad, m->feedback.velocity_rad_s, now,
+                    m->feedback.rx_sequence, m->feedback.last_received_ms)) ||
+                 !cybergear_controller_commit_queued(&m->controller, 0.0f, now)))
+                cybergear_latch_fault(m, CG_FAULT_NUMERIC);
+            if (queued) {
+                m->last_control_ms = now;
+                m->tx_failure_active = false;
             }
         }
+    } else if (elapsed > 0U) {
+        m->mode_mismatch_active = false;
+        const uint32_t period = m->config.controller.period_ms;
+        const uint32_t tolerance = m->config.controller.timing_tolerance_ms;
+        if (elapsed < period - tolerance || (m->first_cyclic && elapsed < period)) goto done;
+        m->first_cyclic = false;
+        const bool measurement_valid = measurement_usable(m);
         if (fabsf(target - m->requested_target_rad) > m->effective_limits.target_tolerance_rad) {
             const bool waiting = fabsf(m->requested_target_rad - m->trajectory.target_rad) > m->effective_limits.target_tolerance_rad;
             m->requested_target_rad = target;
@@ -1018,25 +1100,25 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
              * activation slot; invalidating it on every 10 ms target would
              * starve a 50 ms lookahead forever. Newest target is planned next. */
         }
-        if (m->recovery_zero_active && now - m->recovery_started_ms >= m->config.recovery_zero_ms) {
+        if (m->recovery_zero_active && measurement_valid &&
+            now - m->recovery_started_ms >= m->config.recovery_zero_ms) {
             const CgTrajectoryPoint origin = { .q_rad = m->feedback.position_rad };
-            if (origin.q_rad < m->effective_limits.position_min_rad ||
-                origin.q_rad > m->effective_limits.position_max_rad) {
-                cybergear_latch_fault(m, CG_FAULT_POSITION); goto done;
-            }
+            m->effective_limits.position_min_rad = fminf(m->config.trajectory.position_min_rad, origin.q_rad);
+            m->effective_limits.position_max_rad = fmaxf(m->config.trajectory.position_max_rad, origin.q_rad);
             if (!cg_trajectory_reset(&m->trajectory, &origin, &m->effective_limits)) {
-                cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done;
+                cybergear_latch_fault(m, CG_FAULT_CONFIG); goto done;
             }
             m->trajectory_start_ms = now;
             m->requested_since_ms = now;
             m->prepared_ready = false;
+            m->planning_fault = false;
             m->plan_generation++;
             m->tracking_active = false;
             m->saturation_active = false;
             m->stall_active = false;
             m->recovery_zero_active = false;
         }
-        if (m->planning_fault) { cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done; }
+        if (m->planning_fault) begin_recovery(m, CG_FAULT_PLANNER, now);
         if (!m->recovery_zero_active && m->prepared_ready && time_reached(now, m->prepared_start_ms)) {
             m->trajectory = m->prepared; m->trajectory_start_ms = m->prepared_start_ms;
             m->prepared_ready = false; m->plan_generation++; m->requested_since_ms = now;
@@ -1044,10 +1126,10 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
         if (!m->recovery_zero_active &&
             fabsf(m->requested_target_rad - m->trajectory.target_rad) > m->effective_limits.target_tolerance_rad &&
             now - m->requested_since_ms > m->config.planner_timeout_ms) {
-            cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done;
+            begin_recovery(m, CG_FAULT_PLANNER, now);
         }
         if (!cg_trajectory_evaluate(&m->trajectory, (double)(now-m->trajectory_start_ms)*0.001, &m->trajectory.point)) {
-            cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done;
+            cybergear_latch_fault(m, CG_FAULT_NUMERIC); goto done;
         }
         m->trajectory.elapsed_s = fmin((double)(now-m->trajectory_start_ms)*0.001, m->trajectory.duration_s);
         m->trajectory.active = m->trajectory.elapsed_s < m->trajectory.duration_s;
@@ -1057,27 +1139,31 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
              * after a long idle cannot replay the original polynomial. */
             CgTrajectoryPoint hold = m->trajectory.point;
             if (!cg_trajectory_reset(&m->trajectory, &hold, &m->effective_limits)) {
-                cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done;
+                cybergear_latch_fault(m, CG_FAULT_CONFIG); goto done;
             }
             m->trajectory_start_ms = now;
         }
-        if (!cybergear_dynamics_step(&m->dynamics, &m->posture, now, (float)period*0.001f, &m->dynamics_output) ||
-            m->dynamics_output.status == CYBERGEAR_MODEL_STALE || m->dynamics_output.status == CYBERGEAR_MODEL_INVALID) {
+        if (!cybergear_dynamics_step(&m->dynamics, &m->posture, now, (float)period*0.001f, &m->dynamics_output)) {
             cybergear_latch_fault(m, CG_FAULT_MODEL); goto done;
         }
         CyberGearControllerReference reference = {m->trajectory.point.q_rad, m->trajectory.point.v_rad_s, m->trajectory.point.a_rad_s2};
-        CyberGearControllerMeasurement measurement = {m->feedback.position_rad,m->feedback.rx_sequence,m->feedback.last_received_ms,true};
+        CyberGearControllerMeasurement measurement = {m->feedback.position_rad,m->feedback.rx_sequence,m->feedback.last_received_ms,measurement_valid};
         if (m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT &&
             !cybergear_controller_step(&m->controller, &reference, &measurement, now, m->dynamics_output.b0, &m->output)) {
-            cybergear_latch_fault(m, CG_FAULT_NUMERIC); goto done;
+            cybergear_latch_fault(m, now - m->controller.rx_timestamp_ms > m->config.controller.feedback_timeout_ms ?
+                CG_FAULT_FEEDBACK : CG_FAULT_NUMERIC); goto done;
         }
         if (m->requested_mode == CYBERGEAR_RUN_MODE_OPERATION) {
             /* The internal PD current is unknown. Do not feed a fictitious zero
              * into an ESO or use an unsent external-current saturation flag. */
             cybergear_controller_invalidate_input(&m->controller);
-            m->controller.rx_sequence = m->feedback.rx_sequence;
-            m->controller.rx_timestamp_ms = m->feedback.last_received_ms;
-            m->controller.last_measured_position_rad = m->feedback.position_rad;
+            if (measurement_valid) {
+                m->controller.rx_sequence = m->feedback.rx_sequence;
+                m->controller.rx_timestamp_ms = m->feedback.last_received_ms;
+                m->controller.last_measured_position_rad = m->feedback.position_rad;
+            } else if (now - m->controller.rx_timestamp_ms > m->config.controller.feedback_timeout_ms) {
+                cybergear_latch_fault(m, CG_FAULT_FEEDBACK); goto done;
+            }
         }
         m->last_control_ms = now;
         const CyberGearFault protection = running_protection(m, now);
@@ -1093,18 +1179,24 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
         m->internal_send = true;
         bool sent;
         if (m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT) sent = cybergear_set_current(m, m->output.current_a);
+        else if (m->recovery_zero_active) sent = cybergear_control(m, m->feedback.position_rad, 0.0f, 0.0f, 0.0f, 0.0f);
         else sent = cybergear_control(m, reference.position_rad, reference.velocity_rad_s,
             m->config.operation_kp, m->config.operation_kd, 0.0f);
         m->internal_send = false;
-        if (!sent) cybergear_latch_fault(m, CG_FAULT_TX);
-        else if (m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT &&
-            !cybergear_controller_commit_queued(&m->controller, m->output.current_a, now))
-            cybergear_latch_fault(m, CG_FAULT_NUMERIC);
+        if (!sent) {
+            if (timed_condition(true, &m->tx_failure_active, &m->tx_failure_since_ms,
+                now, m->config.controller.feedback_timeout_ms)) cybergear_latch_fault(m, CG_FAULT_TX);
+        } else {
+            m->tx_failure_active = false;
+            if (m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT &&
+                !cybergear_controller_commit_queued(&m->controller, m->output.current_a, now))
+                cybergear_latch_fault(m, CG_FAULT_NUMERIC);
+        }
     }
 done:
     if (m->state == CG_STATE_STOPPING) service_stop(m, now);
     record_log(m, now, elapsed);
-    return m->state != CG_STATE_FAULT && m->state != CG_STATE_STOPPING;
+    return m->fault == CG_FAULT_NONE;
 }
 
 bool cybergear_start_position_adrc(CyberGearMotor *m)
@@ -1112,11 +1204,12 @@ bool cybergear_start_position_adrc(CyberGearMotor *m)
     if (!cybergear_begin_position_control(m, CYBERGEAR_COMPARE_OPERATION_MODE ?
         CYBERGEAR_RUN_MODE_OPERATION : CYBERGEAR_RUN_MODE_CURRENT)) return false;
     /* Before TIM6 starts, service the same bounded state machine in main.
-     * Failure drains STOP retries before caller's existing Error_Handler. */
-    while (m->state != CG_STATE_RUNNING && m->state != CG_STATE_FAULT) {
+     * Failure returns after servicing the STOP confirmation window. */
+    while (m->state != CG_STATE_RUNNING && m->state != CG_STATE_FAULT && m->state != CG_STATE_STOPPED) {
         const uint32_t mask = lock_state();
         cybergear_control_position_adrc(m, 0.0f);
         __set_PRIMASK(mask);
+        if (m->state == CG_STATE_STOPPING && m->fault == CG_FAULT_NONE) return false;
         if (m->state != CG_STATE_RUNNING) HAL_Delay(m->config.controller.period_ms);
     }
     return m->state == CG_STATE_RUNNING;

@@ -33,7 +33,14 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef enum
+{
+  CG_HOME_SET_MODE,
+  CG_HOME_SET_VELOCITY,
+  CG_HOME_ENABLE,
+  CG_HOME_STOP,
+  CG_HOME_SET_ZERO
+} CyberGearHomingCommand;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -81,7 +88,9 @@ CyberGearMotor cybergear_base;
 
 volatile float target_angle[4] = {0,0,2.0,0};
 static volatile bool motor_init_requested = false;
+static volatile bool motor_initializing = false;
 static volatile bool motors_running = false;
+static volatile bool motor_stop_pending = false;
 static volatile bool motor_return_active = false;
 static volatile uint32_t motor_return_started_ms = 0U;
 static volatile bool motor_init_feedback_received = false;
@@ -91,6 +100,15 @@ static volatile uint32_t motor_can_last_rx_id = 0U;
 static volatile uint32_t motor_can_last_rx_dlc = 0U;
 static volatile uint32_t motor_can_last_rx_id_type = 0U;
 static RobstrideStartup robstride_startup;
+static bool robstride_mode_pending[3] = {false};
+static uint32_t robstride_mode_since_ms[3] = {0U};
+static bool diagnostic_uart_ready = false;
+static uint32_t motor_stop_queued_mask = 0U;
+static uint32_t motor_stopped_mask = 0U;
+static uint32_t motor_stop_baseline[3] = {0U};
+static uint32_t motor_stop_cybergear_baseline = 0U;
+static uint32_t motor_stop_next_axis = 0U;
+static uint32_t motor_stop_last_probe_ms = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -102,6 +120,7 @@ static void MX_TIM6_Init(void);
 static void MX_FDCAN3_Init(void);
 /* USER CODE BEGIN PFP */
 static void motor_init_failed(const char *reason);
+static bool motor_stop_all(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -138,18 +157,102 @@ static void motor_check_feedback(void)
   const uint32_t interrupt_mask = __get_PRIMASK();
   __disable_irq();
   const uint32_t now_ms = HAL_GetTick();
+  const bool stop_requested = cybergear_base.fault == CG_FAULT_NONE &&
+      (cybergear_base.state == CG_STATE_STOPPING || cybergear_base.state == CG_STATE_STOPPED);
   bool healthy = cybergear_base.state == CG_STATE_RUNNING &&
       cybergear_base.feedback.online && cybergear_base.feedback.fault_flags == 0U &&
-      now_ms - cybergear_base.feedback.last_received_ms < cybergear_base.config.controller.feedback_timeout_ms;
+      now_ms - cybergear_base.feedback.last_received_ms <= cybergear_base.config.controller.feedback_timeout_ms;
   for (uint32_t index = 0U; index < 3U; ++index)
   {
     const RobstrideFeedback feedback = robstride_handler[index].feedback;
+    if (feedback.mode == 2U)
+    {
+      robstride_mode_pending[index] = false;
+    }
+    else if (!robstride_mode_pending[index])
+    {
+      robstride_mode_pending[index] = true;
+      robstride_mode_since_ms[index] = now_ms;
+    }
+    const bool mode_valid = !robstride_mode_pending[index] ||
+        now_ms - robstride_mode_since_ms[index] <= ROBSTRIDE_STARTUP_FEEDBACK_MS;
     healthy = healthy && feedback.online && feedback.fault_flags == 0U &&
-        feedback.mode == 2U && isfinite(feedback.position_rad) &&
-        now_ms - feedback.last_leceived_ms < ROBSTRIDE_STARTUP_FEEDBACK_MS;
+        mode_valid && isfinite(feedback.position_rad) &&
+        now_ms - feedback.last_leceived_ms <= ROBSTRIDE_STARTUP_FEEDBACK_MS;
   }
   __set_PRIMASK(interrupt_mask);
-  if (!healthy) motor_init_failed("motor feedback or control fault");
+  if (stop_requested)
+  {
+    if (motor_stop_all())
+      printf("Motors stopped; waiting for initialization request\r\n");
+    else
+      printf("Motor STOP confirmation pending; retrying\r\n");
+  }
+  else if (!healthy) motor_init_failed("motor feedback or control fault");
+}
+
+static void motor_stop_update(void)
+{
+  if (!motor_stop_pending) return;
+  const uint32_t now_ms = HAL_GetTick();
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  if (cybergear_base.managed)
+  {
+    cybergear_control_position_adrc(&cybergear_base, 0.0f);
+  }
+  if (now_ms - motor_stop_last_probe_ms >= 10U)
+  {
+    if (motor_stop_next_axis == 3U && !cybergear_base.managed && (motor_stopped_mask & 8U) == 0U)
+    {
+      const uint32_t sequence = cybergear_base.feedback.rx_sequence;
+      if (cybergear_stop(&cybergear_base) && (motor_stop_queued_mask & 8U) == 0U)
+      {
+        motor_stop_cybergear_baseline = sequence;
+        motor_stop_queued_mask |= 8U;
+      }
+    }
+    else if (motor_stop_next_axis < 3U && (motor_stopped_mask & (1U << motor_stop_next_axis)) == 0U)
+    {
+      const uint32_t index = motor_stop_next_axis;
+      const uint32_t sequence = robstride_handler[index].feedback.received_count;
+      if (robstride_stop(&robstride_handler[index]) && (motor_stop_queued_mask & (1U << index)) == 0U)
+      {
+        motor_stop_baseline[index] = sequence;
+        motor_stop_queued_mask |= 1U << index;
+      }
+    }
+    motor_stop_next_axis = (motor_stop_next_axis + 1U) % 4U;
+    motor_stop_last_probe_ms = now_ms;
+  }
+  const uint32_t sample_ms = HAL_GetTick();
+  for (uint32_t index = 0U; index < 3U; ++index)
+  {
+    const RobstrideFeedback feedback = robstride_handler[index].feedback;
+    if (feedback.online && feedback.received_count != motor_stop_baseline[index] &&
+        feedback.mode == 0U && isfinite(feedback.velocity_rps) &&
+        fabsf(feedback.velocity_rps) <= 0.05f &&
+        sample_ms - feedback.last_leceived_ms <= ROBSTRIDE_STARTUP_FEEDBACK_MS)
+      motor_stopped_mask |= 1U << index;
+  }
+  if (cybergear_base.managed || cybergear_base.state == CG_STATE_STOPPED)
+  {
+    if (cybergear_base.stop_queued) motor_stop_queued_mask |= 8U;
+    if (cybergear_base.reset_confirmed && cybergear_base.stationary &&
+        cybergear_base.feedback.mode == 0U &&
+        sample_ms - cybergear_base.feedback.last_received_ms <= cybergear_base.config.controller.feedback_timeout_ms)
+      motor_stopped_mask |= 8U;
+  }
+  else
+  {
+    const CyberGearFeedback feedback = cybergear_base.feedback;
+    if (feedback.online && feedback.rx_sequence != motor_stop_cybergear_baseline && feedback.mode == 0U &&
+        isfinite(feedback.velocity_rad_s) && fabsf(feedback.velocity_rad_s) <= 0.05f &&
+        sample_ms - feedback.last_received_ms <= CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS)
+      motor_stopped_mask |= 8U;
+  }
+  if ((motor_stop_queued_mask & motor_stopped_mask) == 15U) motor_stop_pending = false;
+  __set_PRIMASK(mask);
 }
 
 static bool motor_stop_all(void)
@@ -158,88 +261,27 @@ static bool motor_stop_all(void)
   __disable_irq();
   motors_running = false;
   motor_return_active = false;
+  motor_init_requested = false;
+  motor_stop_pending = true;
+  motor_stop_queued_mask = 0U;
+  motor_stopped_mask = 0U;
+  for (uint32_t index = 0U; index < 3U; ++index)
+    motor_stop_baseline[index] = robstride_handler[index].feedback.received_count;
+  motor_stop_cybergear_baseline = cybergear_base.feedback.rx_sequence;
+  motor_stop_next_axis = 0U;
+  motor_stop_last_probe_ms = HAL_GetTick() - 10U;
+  if (cybergear_base.managed) cybergear_stop(&cybergear_base);
   __set_PRIMASK(interrupt_mask);
   HAL_TIM_Base_Stop_IT(&htim6);
   const uint32_t started_ms = HAL_GetTick();
-  uint32_t last_probe_ms = started_ms - 10U;
-  uint32_t next_stop_axis = 0U;
-  uint32_t queued_mask = 0U;
-  uint32_t stopped_mask = 0U;
-  uint32_t baseline[3] = {0};
-  uint32_t cybergear_baseline = cybergear_base.feedback.rx_sequence;
-  if (cybergear_base.managed) cybergear_stop(&cybergear_base);
   do
   {
-    const uint32_t now_ms = HAL_GetTick();
-    if (cybergear_base.managed)
-    {
-      const uint32_t mask = __get_PRIMASK();
-      __disable_irq();
-      cybergear_control_position_adrc(&cybergear_base, 0.0f);
-      __set_PRIMASK(mask);
-    }
-    if (now_ms - last_probe_ms >= 10U)
-    {
-      const uint32_t mask = __get_PRIMASK();
-      __disable_irq();
-      if (next_stop_axis == 3U && !cybergear_base.managed)
-      {
-        const uint32_t sequence = cybergear_base.feedback.rx_sequence;
-        if (cybergear_stop(&cybergear_base) && (queued_mask & 8U) == 0U)
-        {
-          cybergear_baseline = sequence;
-          queued_mask |= 8U;
-        }
-      }
-      else if (next_stop_axis < 3U)
-      {
-        const uint32_t index = next_stop_axis;
-        const uint32_t sequence = robstride_handler[index].feedback.received_count;
-        if (robstride_stop(&robstride_handler[index]) && (queued_mask & (1U << index)) == 0U)
-        {
-          baseline[index] = sequence;
-          queued_mask |= 1U << index;
-        }
-      }
-      next_stop_axis = (next_stop_axis + 1U) % 4U;
-      __set_PRIMASK(mask);
-      last_probe_ms = now_ms;
-    }
-    const uint32_t mask = __get_PRIMASK();
-    __disable_irq();
-    const uint32_t sample_ms = HAL_GetTick();
-    stopped_mask = 0U;
-    for (uint32_t index = 0U; index < 3U; ++index)
-    {
-      const RobstrideFeedback feedback = robstride_handler[index].feedback;
-      if (feedback.online && feedback.received_count != baseline[index] &&
-          feedback.mode == 0U && isfinite(feedback.velocity_rps) &&
-          fabsf(feedback.velocity_rps) <= 0.05f &&
-          sample_ms - feedback.last_leceived_ms < ROBSTRIDE_STARTUP_FEEDBACK_MS)
-        stopped_mask |= 1U << index;
-    }
-    if (cybergear_base.managed)
-    {
-      if (cybergear_base.stop_queued) queued_mask |= 8U;
-      if (cybergear_base.reset_confirmed && cybergear_base.stationary &&
-          cybergear_base.feedback.mode == 0U &&
-          sample_ms - cybergear_base.feedback.last_received_ms < cybergear_base.config.controller.feedback_timeout_ms)
-        stopped_mask |= 8U;
-    }
-    else
-    {
-      const CyberGearFeedback feedback = cybergear_base.feedback;
-      if (feedback.online && feedback.rx_sequence != cybergear_baseline && feedback.mode == 0U &&
-          isfinite(feedback.velocity_rad_s) && fabsf(feedback.velocity_rad_s) <= 0.05f &&
-          sample_ms - feedback.last_received_ms < CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS)
-        stopped_mask |= 8U;
-    }
-    __set_PRIMASK(mask);
-    if ((queued_mask & stopped_mask) == 15U) return true;
-    HAL_Delay(cybergear_base.config.controller.period_ms);
+    motor_stop_update();
+    if (!motor_stop_pending) return true;
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   } while (HAL_GetTick() - started_ms < MOTOR_STOP_TIMEOUT_MS);
   printf("Motor STOP unconfirmed: queued=0x%lX stopped=0x%lX\r\n",
-         (unsigned long)queued_mask, (unsigned long)stopped_mask);
+         (unsigned long)motor_stop_queued_mask, (unsigned long)motor_stopped_mask);
   return false;
 }
 
@@ -248,7 +290,8 @@ static void motor_init_failed(const char *reason)
   motor_stop_all();
   printf("Motor initialization/control failed: %s\r\n", reason);
   motor_init_print_can_status();
-  Error_Handler();
+  motor_init_requested = false;
+  printf("Waiting for a new motor initialization request\r\n");
 }
 
 static void motor_return_update(void)
@@ -279,6 +322,7 @@ static void motor_return_update(void)
 
 static void el05_debug_print(void)
 {
+  if (!motors_running || !diagnostic_uart_ready) return;
   static uint32_t last_print_ms = 0U;
   const uint32_t now_ms = HAL_GetTick();
   if ((uint32_t)(now_ms - last_print_ms) < EL05_DEBUG_INTERVAL_MS)
@@ -300,6 +344,7 @@ static void el05_debug_print(void)
 static void cybergear_debug_print(void)
 {
 #if CYBERGEAR_LOG_UART
+  if (!diagnostic_uart_ready) return;
   /* Drain at most one record per main iteration; keep every line < UART timeout. */
   CyberGearLog log;
   if (!cybergear_pop_log(&cybergear_base, &log)) return;
@@ -319,6 +364,50 @@ static void cybergear_debug_print(void)
       (unsigned)log.reset_confirmed, (unsigned)log.stationary);
 #endif
 }
+
+static bool cybergear_homing_send(CyberGearHomingCommand command, float value)
+{
+  const uint32_t started_ms = HAL_GetTick();
+  do
+  {
+    const uint32_t interrupt_mask = __get_PRIMASK();
+    __disable_irq();
+    const bool faulted = cybergear_base.feedback.fault_flags != 0U ||
+        cybergear_base.motor_fault_sequence != 0U;
+    const bool feedback_valid = command != CG_HOME_SET_VELOCITY || value == 0.0f ||
+        (cybergear_base.feedback.online && isfinite(cybergear_base.feedback.position_rad) &&
+         isfinite(cybergear_base.feedback.velocity_rad_s) &&
+         HAL_GetTick() - cybergear_base.feedback.last_received_ms <= CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS);
+    bool queued = false;
+    if ((!faulted || command == CG_HOME_STOP) && feedback_valid)
+    {
+      switch (command)
+      {
+        case CG_HOME_SET_MODE:
+          queued = cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_SPEED);
+          break;
+        case CG_HOME_SET_VELOCITY:
+          queued = cybergear_set_velocity(&cybergear_base, value);
+          break;
+        case CG_HOME_ENABLE:
+          queued = cybergear_enable(&cybergear_base);
+          break;
+        case CG_HOME_STOP:
+          queued = cybergear_stop(&cybergear_base);
+          break;
+        case CG_HOME_SET_ZERO:
+          queued = cybergear_set_zero(&cybergear_base);
+          break;
+      }
+    }
+    __set_PRIMASK(interrupt_mask);
+    if (queued) return true;
+    if ((faulted && command != CG_HOME_STOP) || !feedback_valid) return false;
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
+  } while (HAL_GetTick() - started_ms < CYBERGEAR_HOMING_PROBE_INTERVAL_MS);
+  return false;
+}
+
 static bool cybergear_homing_feedback(CyberGearFeedback *feedback)
 {
   motor_check_feedback();
@@ -329,7 +418,7 @@ static bool cybergear_homing_feedback(CyberGearFeedback *feedback)
   __set_PRIMASK(interrupt_mask);
   const bool valid = feedback->online && feedback->fault_flags == 0U &&
       isfinite(feedback->position_rad) && isfinite(feedback->velocity_rad_s) &&
-      (uint32_t)(now_ms - feedback->last_received_ms) < CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS;
+      (uint32_t)(now_ms - feedback->last_received_ms) <= CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS;
   if (!valid)
   {
     cybergear_stop(&cybergear_base);
@@ -358,7 +447,7 @@ static bool cybergear_homing_clear_edge(float direction)
       printf("CG home clearance timeout\r\n");
       return false;
     }
-    if (!cybergear_set_velocity(&cybergear_base, direction * CYBERGEAR_HOMING_SLOW_SPEED_RAD_S))
+    if (!cybergear_homing_send(CG_HOME_SET_VELOCITY, direction * CYBERGEAR_HOMING_SLOW_SPEED_RAD_S))
     {
       cybergear_stop(&cybergear_base);
       printf("CG home clearance TX failed\r\n");
@@ -378,7 +467,7 @@ static bool cybergear_homing_measure_edge(float direction, float *edge_rad)
   /* Clearance can cross a narrow detection region completely. Use the actual
      state here rather than assuming the state seen at the previous edge. */
   const GPIO_PinState from_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-  if (!cybergear_set_velocity(&cybergear_base, direction * CYBERGEAR_HOMING_SLOW_SPEED_RAD_S))
+  if (!cybergear_homing_send(CG_HOME_SET_VELOCITY, direction * CYBERGEAR_HOMING_SLOW_SPEED_RAD_S))
   {
     cybergear_stop(&cybergear_base);
     printf("CG home edge TX failed\r\n");
@@ -415,7 +504,7 @@ static bool cybergear_homing_measure_edge(float direction, float *edge_rad)
     {
       edge_pending = false;
     }
-    if (!cybergear_set_velocity(&cybergear_base, direction * CYBERGEAR_HOMING_SLOW_SPEED_RAD_S))
+    if (!cybergear_homing_send(CG_HOME_SET_VELOCITY, direction * CYBERGEAR_HOMING_SLOW_SPEED_RAD_S))
     {
       cybergear_stop(&cybergear_base);
       printf("CG home edge TX failed\r\n");
@@ -456,7 +545,7 @@ static bool cybergear_homing_move_to_center(float center_rad)
     {
       return true;
     }
-    if (!cybergear_set_velocity(&cybergear_base, speed_rad_s))
+    if (!cybergear_homing_send(CG_HOME_SET_VELOCITY, speed_rad_s))
     {
       cybergear_stop(&cybergear_base);
       printf("CG home center TX failed\r\n");
@@ -476,19 +565,19 @@ static bool cybergear_homing_move_to_center(float center_rad)
 bool cybergear_homing(void)
 {
   // 1. 速度制御モードに変更して有効化
-  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_SPEED)) 
+  if (!cybergear_homing_send(CG_HOME_SET_MODE, 0.0f))
   {
     return false;
   }
   HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
-  if (!cybergear_set_velocity(&cybergear_base, 0.0f))
+  if (!cybergear_homing_send(CG_HOME_SET_VELOCITY, 0.0f))
   {
     cybergear_stop(&cybergear_base);
     return false;
   }
   const uint32_t feedback_wait_started_ms = HAL_GetTick();
   uint32_t last_enable_ms = feedback_wait_started_ms;
-  if (!cybergear_enable(&cybergear_base)) 
+  if (!cybergear_homing_send(CG_HOME_ENABLE, 0.0f))
   {
     return false;
   }
@@ -517,7 +606,7 @@ bool cybergear_homing(void)
     /* Retry a lost enable response while the speed reference is still zero. */
     if ((uint32_t)(now_ms - last_enable_ms) >= CYBERGEAR_HOMING_PROBE_INTERVAL_MS)
     {
-      if (!cybergear_enable(&cybergear_base))
+      if (!cybergear_homing_send(CG_HOME_ENABLE, 0.0f))
       {
         cybergear_stop(&cybergear_base);
         motor_init_print_can_status();
@@ -539,7 +628,7 @@ bool cybergear_homing(void)
   const uint32_t search_started_ms = HAL_GetTick();
   const GPIO_PinState initial_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
 
-  if (!cybergear_set_velocity(&cybergear_base, CYBERGEAR_HOMING_FAST_SPEED_RAD_S))
+  if (!cybergear_homing_send(CG_HOME_SET_VELOCITY, CYBERGEAR_HOMING_FAST_SPEED_RAD_S))
   {
     cybergear_stop(&cybergear_base);
     return false;
@@ -562,7 +651,7 @@ bool cybergear_homing(void)
       direction = -1.0f;
       reversed = true;
     }
-    if (!cybergear_set_velocity(&cybergear_base, direction * CYBERGEAR_HOMING_FAST_SPEED_RAD_S))
+    if (!cybergear_homing_send(CG_HOME_SET_VELOCITY, direction * CYBERGEAR_HOMING_FAST_SPEED_RAD_S))
     {
       cybergear_stop(&cybergear_base);
       return false;
@@ -606,14 +695,14 @@ bool cybergear_homing(void)
     return false;
   }
 
-  if (!cybergear_stop(&cybergear_base))
+  if (!cybergear_homing_send(CG_HOME_STOP, 0.0f))
   {
     return false;
   }
   /* Allow STOP to be sent before setting zero; no position/settling check. */
   HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
 
-  if (!cybergear_set_zero(&cybergear_base))
+  if (!cybergear_homing_send(CG_HOME_SET_ZERO, 0.0f))
   {
     return false;
   }
@@ -679,7 +768,7 @@ bool cybergear_base_init(void)
     __set_PRIMASK(interrupt_mask);
     const uint32_t now_ms = HAL_GetTick();
     if (feedback.online &&
-        (uint32_t)(now_ms - feedback.last_received_ms) < CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS)
+        (uint32_t)(now_ms - feedback.last_received_ms) <= CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS)
     {
       if (feedback.fault_flags != 0U)
       {
@@ -739,6 +828,40 @@ static bool motor_start_control(void)
     cybergear_service(&cybergear_base);
     HAL_Delay(cybergear_base.config.controller.period_ms);
   }
+}
+
+static void motor_initialize_requested(void)
+{
+  const uint32_t interrupt_mask = __get_PRIMASK();
+  __disable_irq();
+  if (!motor_init_requested || motors_running || motor_initializing || motor_stop_pending)
+  {
+    __set_PRIMASK(interrupt_mask);
+    return;
+  }
+  motor_init_requested = false;
+  motor_initializing = true;
+  motor_init_feedback_received = false;
+  motor_last_feedback_ms = HAL_GetTick();
+  for (uint32_t index = 0U; index < 3U; ++index)
+    robstride_mode_pending[index] = false;
+  __set_PRIMASK(interrupt_mask);
+
+  const uint32_t started_ms = HAL_GetTick();
+  if (!cybergear_base_init())
+    motor_init_failed("CyberGear startup/configuration");
+  else if (!cybergear_homing())
+    motor_init_failed("CyberGear homing");
+  else if (!motor_start_control())
+    motor_init_failed("motor startup confirmation or control timer");
+  else
+    printf("Motor initialization complete: %lu ms\r\n",
+           (unsigned long)(HAL_GetTick() - started_ms));
+
+  __disable_irq();
+  motor_init_requested = false;
+  motor_initializing = false;
+  __set_PRIMASK(interrupt_mask);
 }
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
@@ -839,7 +962,8 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
           const int32_t command = board_decode_init_command(rxdata);
           //printf("%d\r\n",command);
           /* Use the first valid command as the baseline for change detection. */
-          if (!motor_return_active && has_previous_command && command != previous_command)
+          if (!motor_return_active && !motor_initializing && !motor_stop_pending &&
+              has_previous_command && command != previous_command)
           {
             if (motors_running)
             {
@@ -995,47 +1119,13 @@ int main(void)
   if (!cybergear_init(&cybergear_base, &hfdcan3, CYBER_GEAR_ID, HOST_ID))
   {
     Error_Handler();
-    return 1;
   }
   if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK ||
       motor_CAN_RxTxSettings_init(&motor_txheader) != HAL_OK)
   {
     motor_init_failed("CAN setup");
-    return 1;
+    Error_Handler();
   }
-
-  /* CAN reception is active; defer homing, enable and cyclic commands. */
-  while (!motor_init_requested)
-  {
-    HAL_Delay(10);
-  }
-
-  /* Start monitoring with initialization, then keep monitoring in normal use. */
-  const uint32_t motor_init_started_ms = HAL_GetTick();
-  const uint32_t interrupt_mask = __get_PRIMASK();
-  __disable_irq();
-  motor_init_feedback_received = false;
-  motor_last_feedback_ms = HAL_GetTick();
-  __set_PRIMASK(interrupt_mask);
-
-  if (!cybergear_base_init())
-  {
-    motor_init_failed("CyberGear startup/configuration");
-    return 1;
-  }
-
-  if (!cybergear_homing())
-  {
-    motor_init_failed("CyberGear homing");
-    return 1;
-  }
-  if (!motor_start_control())
-  {
-    motor_init_failed("motor startup confirmation or control timer");
-    return 1;
-  }
-  printf("Motor initialization complete: %lu ms\r\n",
-         (unsigned long)(HAL_GetTick() - motor_init_started_ms));
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1046,6 +1136,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    motor_stop_update();
+    motor_initialize_requested();
     motor_check_feedback();
     motor_return_update();
     cybergear_service(&cybergear_base);
@@ -1255,22 +1347,22 @@ static void MX_USART2_UART_Init(void)
   huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   if (HAL_UART_Init(&huart2) != HAL_OK)
   {
-    Error_Handler();
+    return;
   }
   if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
-    Error_Handler();
+    return;
   }
   if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
-    Error_Handler();
+    return;
   }
   if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
   {
-    Error_Handler();
+    return;
   }
   /* USER CODE BEGIN USART2_Init 2 */
-
+  diagnostic_uart_ready = true;
   /* USER CODE END USART2_Init 2 */
 
 }
@@ -1334,7 +1426,8 @@ static void MX_GPIO_Init(void)
 
 int _write(int file,char *ptr,int len)
 {
-  HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, CYBERGEAR_UART_TX_TIMEOUT_MS);
+  if (diagnostic_uart_ready)
+    HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, CYBERGEAR_UART_TX_TIMEOUT_MS);
   return len;
 }
 /* USER CODE END 4 */

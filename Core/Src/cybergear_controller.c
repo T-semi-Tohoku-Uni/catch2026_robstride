@@ -113,8 +113,7 @@ bool cybergear_controller_commit_queued(CyberGearController *controller,
     if (controller == NULL || !controller->initialized || !isfinite(current_a) ||
         fabsf(current_a) > controller->config.current_limit_a ||
         !forward_or_equal(now_ms, controller->last_queued_timestamp_ms) ||
-        (uint32_t)(now_ms - controller->last_control_timestamp_ms) >
-            controller->config.period_ms + controller->config.timing_tolerance_ms) return false;
+        !forward_or_equal(now_ms, controller->last_control_timestamp_ms)) return false;
     controller->last_queued_current_a = current_a;
     controller->applied_current_estimate_a = current_a;
     controller->last_queued_timestamp_ms = now_ms;
@@ -160,43 +159,65 @@ bool cybergear_controller_step(CyberGearController *controller,
 
     const CyberGearControllerConfig *config = &controller->config;
     const uint32_t elapsed = now_ms - controller->last_control_timestamp_ms;
-    if (elapsed < config->period_ms - config->timing_tolerance_ms ||
-        elapsed > config->period_ms + config->timing_tolerance_ms) return false;
+    if (!forward_or_equal(now_ms, controller->last_control_timestamp_ms)) return false;
 
     CyberGearController next = *controller;
     CyberGearControllerOutput result = {0};
     bool new_measurement = false;
     if (measurement != NULL && measurement->valid) {
-        if (!isfinite(measurement->position_rad) ||
-            (uint32_t)(now_ms - measurement->timestamp_ms) > config->feedback_timeout_ms ||
-            !forward_or_equal(measurement->rx_sequence, controller->rx_sequence) ||
-            !forward_or_equal(measurement->timestamp_ms, controller->rx_timestamp_ms)) return false;
-        if (measurement->rx_sequence != controller->rx_sequence) {
+        if (!isfinite(measurement->position_rad)) return false;
+        if (measurement->rx_sequence != controller->rx_sequence &&
+            (uint32_t)(now_ms - measurement->timestamp_ms) <= config->feedback_timeout_ms &&
+            forward_or_equal(measurement->rx_sequence, controller->rx_sequence) &&
+            forward_or_equal(measurement->timestamp_ms, controller->rx_timestamp_ms)) {
             next.rx_sequence = measurement->rx_sequence;
             next.rx_timestamp_ms = measurement->timestamp_ms;
             next.last_measured_position_rad = measurement->position_rad;
             new_measurement = true;
-        } else if (measurement->timestamp_ms != controller->rx_timestamp_ms) {
-            return false; /* シーケンスが同じなのに時刻だけを新しくして age を延ばさない。 */
         }
     }
     if ((uint32_t)(now_ms - next.rx_timestamp_ms) > config->feedback_timeout_ms) return false;
+    if (elapsed == 0U) {
+        *output = controller->last_output;
+        return true;
+    }
 
-    /* 固定制御時刻に最新受信位置を近似配置する。dt は常に nominal period。
+    /* 制御時刻に最新受信位置を近似配置する。dt は制御の実経過時間。
      * 旧区間は旧 b0 と最後に投入成功した制限後電流で予測する。 */
-    const float dt = (float)config->period_ms * 0.001f;
-    const float acceleration = next.disturbance_rad_s2 +
-        next.b0 * next.applied_current_estimate_a;
-    next.position_rad += dt * next.velocity_rad_s + 0.5f * dt * dt * acceleration;
-    next.velocity_rad_s += dt * acceleration;
+    const bool resynchronize = elapsed > config->feedback_timeout_ms;
+    const uint32_t integration_ms = resynchronize ? config->period_ms : elapsed;
+    const float dt = (float)integration_ms * 0.001f;
+    const float slew_dt = (float)(elapsed < config->period_ms ? elapsed : config->period_ms) * 0.001f;
+    if (resynchronize) {
+        next.position_rad = next.last_measured_position_rad;
+        next.velocity_rad_s = 0.0f;
+        next.disturbance_rad_s2 = 0.0f;
+        next.disturbance_current_a = 0.0f;
+        next.compensation_elapsed_ms = 0U;
+    } else {
+        const float acceleration = next.disturbance_rad_s2 +
+            next.b0 * next.applied_current_estimate_a;
+        next.position_rad += dt * next.velocity_rad_s + 0.5f * dt * dt * acceleration;
+        next.velocity_rad_s += dt * acceleration;
+    }
     next.disturbance_rad_s2 *= expf(-disturbance_leak(&next, reference->position_rad) * dt);
 
     if (new_measurement) {
         /* ZOH current observer: L1=1-p³, L2=3(1-p)²(1+p)/(2T), L3=(1-p)³/T² */
+        float position_gain = next.observer_position_gain;
+        float velocity_gain = next.observer_velocity_gain;
+        float disturbance_gain = next.observer_disturbance_gain;
+        if (integration_ms != config->period_ms) {
+            const float pole = expf(-config->observer_rad_s * dt);
+            const float delta = 1.0f - pole;
+            position_gain = 1.0f - pole * pole * pole;
+            velocity_gain = 1.5f * delta * delta * (1.0f + pole) / dt;
+            disturbance_gain = delta * delta * delta / (dt * dt);
+        }
         result.innovation_rad = next.last_measured_position_rad - next.position_rad;
-        next.position_rad += next.observer_position_gain * result.innovation_rad;
-        next.velocity_rad_s += next.observer_velocity_gain * result.innovation_rad;
-        next.disturbance_rad_s2 += next.observer_disturbance_gain * result.innovation_rad;
+        next.position_rad += position_gain * result.innovation_rad;
+        next.velocity_rad_s += velocity_gain * result.innovation_rad;
+        next.disturbance_rad_s2 += disturbance_gain * result.innovation_rad;
         result.measurement_corrected = true;
     }
 
@@ -208,7 +229,7 @@ bool cybergear_controller_step(CyberGearController *controller,
 
     const uint32_t ramp_end = config->compensation_delay_ms + config->compensation_ramp_ms;
     const uint32_t remaining = ramp_end - next.compensation_elapsed_ms;
-    next.compensation_elapsed_ms += remaining > config->period_ms ? config->period_ms : remaining;
+    next.compensation_elapsed_ms += remaining > integration_ms ? integration_ms : remaining;
     if (next.compensation_elapsed_ms > config->compensation_delay_ms) {
         const float phase = (float)(next.compensation_elapsed_ms - config->compensation_delay_ms) /
             (float)config->compensation_ramp_ms;
@@ -217,7 +238,7 @@ bool cybergear_controller_step(CyberGearController *controller,
     const float disturbance_requested = -result.gamma * next.disturbance_rad_s2 / b0;
     const float disturbance_bounded = clamp(disturbance_requested,
         -config->disturbance_limit_a, config->disturbance_limit_a);
-    const float disturbance_step = config->disturbance_slew_a_s * dt;
+    const float disturbance_step = config->disturbance_slew_a_s * slew_dt;
     result.disturbance_current_a = clamp(disturbance_bounded,
         next.disturbance_current_a - disturbance_step, next.disturbance_current_a + disturbance_step);
     result.disturbance_limited = result.disturbance_current_a != disturbance_requested;
@@ -232,8 +253,8 @@ bool cybergear_controller_step(CyberGearController *controller,
         -config->current_limit_a, config->current_limit_a);
     /* rise/fall は符号ではなく数値の増減。正負の制動で同じ式になる。 */
     result.current_a = clamp(result.amplitude_current_a,
-        next.last_queued_current_a - config->current_fall_a_s * dt,
-        next.last_queued_current_a + config->current_rise_a_s * dt);
+        next.last_queued_current_a - config->current_fall_a_s * slew_dt,
+        next.last_queued_current_a + config->current_rise_a_s * slew_dt);
     result.amplitude_limited = result.amplitude_current_a != result.requested_current_a;
     result.slew_limited = result.current_a != result.amplitude_current_a;
 
@@ -243,6 +264,7 @@ bool cybergear_controller_step(CyberGearController *controller,
         !isfinite(result.current_a)) return false;
     next.last_control_timestamp_ms = now_ms;
     next.observer_timestamp_ms = now_ms;
+    next.last_output = result;
     *controller = next;
     *output = result;
     return true;
