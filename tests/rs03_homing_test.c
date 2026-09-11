@@ -43,8 +43,8 @@ void HAL_Delay(uint32_t ms)
 GPIO_PinState HAL_GPIO_ReadPin(void *port, uint16_t pin)
 {
     (void)port;
-    CHECK(pin == 1U || pin == 2U);
-    const unsigned id = pin == 2U ? 4U : 3U;
+    CHECK(pin == 1U); /* Only PC0; PC1 must not be read. */
+    const unsigned id = 3U;
     if (scenario == 1) return GPIO_PIN_SET;
     if (scenario == 2 || scenario == 4) return GPIO_PIN_RESET;
     return sim[id].moves >= 3 ? GPIO_PIN_SET : GPIO_PIN_RESET;
@@ -62,11 +62,10 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *can,
     CHECK(can == &hfdcan3 && mask == 1U);
     const uint8_t id = (uint8_t)header->Identifier;
     const uint8_t type = (uint8_t)(header->Identifier >> 24);
-    CHECK(id == 3 || id == 4); /* No CyberGear or EL05 commands. */
+    CHECK(id == 3); /* No left commands, including startup/failure STOP. */
     CHECK(((header->Identifier >> 8) & 0xffffU) == 0xfeU);
     if (type == 3)
     {
-        if (id == 3) CHECK(sim[4].zero && sim[4].enabled);
         sim[id].enabled = true;
     }
     else if (type == 4) sim[id].enabled = false;
@@ -75,7 +74,7 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *can,
         CHECK(!sim[id].enabled && sim[id].speed == 0.0f);
         CHECK(data[0] == 1);
         for (unsigned i = 1; i < 8; ++i) CHECK(data[i] == 0);
-        CHECK(id == (zeros == 0 ? 4 : 3));
+        CHECK(id == 3 && zeros == 0);
         ++zeros;
         sim[id].zero = scenario != 6;
     }
@@ -89,8 +88,7 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *can,
             if (value != 0.0f)
             {
                 CHECK(sim[id].enabled && sim[id].mode == VELOCITY);
-                CHECK(id == 4 ? value > 0 : value < 0);
-                if (id == 3) CHECK(sim[4].zero && sim[4].holds > 0 && sim[4].enabled);
+                CHECK(value < 0);
                 ++sim[id].moves;
                 if (scenario == 5) return HAL_ERROR;
             }
@@ -139,16 +137,17 @@ static void run(unsigned test_case)
     CHECK(setjmp(unexpected_error) == 0);
     motor_app_start();
     for (unsigned i = 0; i < 10; ++i) motor_app_process();
+    CHECK(!sim[4].enabled && !sim[4].zero && sim[4].moves == 0 && sim[4].holds == 0);
     if (test_case == 0 || test_case == 1 || test_case == 8)
     {
-        CHECK(zeros == 2 && sim[4].enabled && sim[3].enabled);
-        CHECK(sim[4].holds > 10 && sim[3].holds >= 10);
-        if (test_case == 1) CHECK(sim[3].moves == 0 && sim[4].moves == 0);
-        else CHECK(sim[3].moves >= 3 && sim[4].moves >= 3);
+        CHECK(zeros == 1 && sim[3].enabled);
+        CHECK(sim[3].holds >= 10);
+        if (test_case == 1) CHECK(sim[3].moves == 0);
+        else CHECK(sim[3].moves >= 3);
     }
     else
     {
-        CHECK(!sim[3].enabled && !sim[4].enabled && sim[3].moves == 0);
+        CHECK(!sim[3].enabled);
         CHECK(zeros == (test_case == 6 ? 1U : 0U));
     }
 }
@@ -156,6 +155,6 @@ static void run(unsigned test_case)
 int main(void)
 {
     for (unsigned i = 0; i <= 8; ++i) run(i);
-    puts("RS03 sequential homing tests passed");
+    puts("RS03 right-only homing tests passed");
     return 0;
 }

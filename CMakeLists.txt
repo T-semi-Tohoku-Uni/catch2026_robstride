@@ -43,7 +43,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Add sources to executable
-option(RS03_HOMING_ONLY "Build the standalone left/right GPIO zero-setting firmware" ON)
+option(RS03_HOMING_ONLY "Build the standalone right GPIO zero-setting firmware" ON)
 if(RS03_HOMING_ONLY)
     set(MOTOR_APP_SOURCE Core/Src/rs03_homing_app.c)
 else()
