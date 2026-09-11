@@ -107,5 +107,6 @@ bool cybergear_controller_step(CyberGearController *controller,
 bool cybergear_controller_commit_queued(CyberGearController *controller,
     float current_a, uint32_t now_ms);
 void cybergear_controller_invalidate_input(CyberGearController *controller);
+void cybergear_controller_reset_adaptation(CyberGearController *controller);
 
 #endif

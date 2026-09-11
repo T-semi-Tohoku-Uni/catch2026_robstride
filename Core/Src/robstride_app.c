@@ -1,5 +1,4 @@
 #include "robstride_app.h"
-#include "app_mode.h"
 
 #include "main.h"
 
@@ -130,8 +129,6 @@ void robstride_delay(void)
 
 bool send_robstride(RobstrideMotor *motor, uint32_t id, uint8_t *txdata)
 {
-	/* Reject every RobStride frame, including accidental enable/zero writes. */
-	if (APP_CYBERGEAR_STANDALONE_TEST) return false;
 	/* Serialize startup retry sends with TIM6 sends on the same FDCAN. */
 	const uint32_t interrupt_mask = __get_PRIMASK();
 	__disable_irq();

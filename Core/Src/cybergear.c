@@ -454,10 +454,28 @@ void cybergear_config_defaults(CyberGearConfig *c)
     cybergear_controller_default_config(&c->controller);
     c->hardware_confirmed = CYBERGEAR_HARDWARE_CONFIRMED != 0;
     c->controller.period_ms = CYBERGEAR_USE_200_HZ ? 5U : 10U;
+    c->controller.timing_tolerance_ms = CYBERGEAR_TIMING_TOLERANCE_MS;
+    c->controller.feedback_timeout_ms = CYBERGEAR_FEEDBACK_TIMEOUT_MS;
+    c->controller.bandwidth_rad_s = CYBERGEAR_CONTROL_BANDWIDTH_RAD_S;
+    c->controller.damping_ratio = CYBERGEAR_CONTROL_DAMPING_RATIO;
+    c->controller.observer_rad_s = CYBERGEAR_OBSERVER_RAD_S;
     c->controller.b0_initial = CYBERGEAR_B0_FIXED;
     c->controller.b0_min = CYBERGEAR_B0_MIN;
     c->controller.b0_max = CYBERGEAR_B0_MAX;
     c->controller.current_limit_a = CYBERGEAR_CURRENT_LIMIT_A;
+    c->controller.current_rise_a_s = CYBERGEAR_CURRENT_RISE_A_S;
+    c->controller.current_fall_a_s = CYBERGEAR_CURRENT_FALL_A_S;
+    c->controller.disturbance_limit_a = CYBERGEAR_DISTURBANCE_LIMIT_A;
+    c->controller.disturbance_slew_a_s = CYBERGEAR_DISTURBANCE_SLEW_A_S;
+    c->controller.compensation_gain = CYBERGEAR_COMPENSATION_GAIN;
+    c->controller.compensation_delay_ms = CYBERGEAR_COMPENSATION_DELAY_MS;
+    c->controller.compensation_ramp_ms = CYBERGEAR_COMPENSATION_RAMP_MS;
+    c->controller.leak_mode = CYBERGEAR_LEAK_MODE;
+    c->controller.leak_fixed_s = CYBERGEAR_LEAK_FIXED_S;
+    c->controller.leak_near_s = CYBERGEAR_LEAK_NEAR_S;
+    c->controller.leak_far_s = CYBERGEAR_LEAK_FAR_S;
+    c->controller.leak_near_rad = CYBERGEAR_LEAK_NEAR_RAD;
+    c->controller.leak_far_rad = CYBERGEAR_LEAK_FAR_RAD;
     c->trajectory = (CgTrajectoryLimits){
         .position_min_rad = CYBERGEAR_SOFT_MIN_RAD,
         .position_max_rad = CYBERGEAR_SOFT_MAX_RAD,
@@ -465,40 +483,46 @@ void cybergear_config_defaults(CyberGearConfig *c)
         .acceleration_max_rad_s2 = CYBERGEAR_TRAJECTORY_ACCEL_RAD_S2,
         .braking_max_rad_s2 = CYBERGEAR_TRAJECTORY_BRAKE_RAD_S2,
         .jerk_max_rad_s3 = CYBERGEAR_TRAJECTORY_JERK_RAD_S3,
-        .duration_min_s = 0.1f, .duration_max_s = 60.0f,
-        .target_tolerance_rad = 0.0001f, .search_iterations = 32U
+        .duration_min_s = CYBERGEAR_TRAJECTORY_DURATION_MIN_S,
+        .duration_max_s = CYBERGEAR_TRAJECTORY_DURATION_MAX_S,
+        .target_tolerance_rad = CYBERGEAR_TRAJECTORY_TARGET_TOLERANCE_RAD,
+        .search_iterations = CYBERGEAR_TRAJECTORY_SEARCH_ITERATIONS
     };
     c->hard_min_rad = CYBERGEAR_HARD_MIN_RAD;
     c->hard_max_rad = CYBERGEAR_HARD_MAX_RAD;
     c->speed_trip_rad_s = CYBERGEAR_SPEED_TRIP_RAD_S;
     c->temperature_trip_c = CYBERGEAR_TEMPERATURE_TRIP_C;
-    c->position_jump_rad = 0.02f;
-    c->tracking_error_rad = 0.15f;
-    c->tracking_timeout_ms = 500U;
-    c->saturation_timeout_ms = 1000U;
-    c->stall_current_a = 0.8f * c->controller.current_limit_a;
-    c->stall_progress_rad = 0.003f;
-    c->stall_timeout_ms = 1000U;
-    c->stationary_speed_rad_s = 0.03f;
-    c->stationary_dwell_ms = 100U;
-    c->startup_timeout_ms = 3000U;
-    c->command_retry_ms = 50U;
-    c->stop_timeout_ms = 1000U;
-    c->stop_max_attempts = 20U;
-    c->planner_lead_ms = 50U;
-    c->planner_timeout_ms = 500U;
-    c->operation_kp = NAN;
-    c->operation_kd = NAN;
-    c->operation_torque_limit_nm = NAN;
+    c->position_jump_rad = CYBERGEAR_POSITION_JUMP_RAD;
+    c->tracking_error_rad = CYBERGEAR_TRACKING_ERROR_RAD;
+    c->tracking_timeout_ms = CYBERGEAR_TRACKING_TIMEOUT_MS;
+    c->saturation_timeout_ms = CYBERGEAR_SATURATION_TIMEOUT_MS;
+    c->recover_on_saturation = CYBERGEAR_SATURATION_RECOVERY_ENABLED != 0;
+    c->recover_on_tracking = CYBERGEAR_TRACKING_RECOVERY_ENABLED != 0;
+    c->recovery_zero_ms = CYBERGEAR_RECOVERY_ZERO_MS;
+    c->stall_current_a = CYBERGEAR_STALL_CURRENT_FRACTION * c->controller.current_limit_a;
+    c->stall_progress_rad = CYBERGEAR_STALL_PROGRESS_RAD;
+    c->stall_timeout_ms = CYBERGEAR_STALL_TIMEOUT_MS;
+    c->stationary_speed_rad_s = CYBERGEAR_STATIONARY_SPEED_RAD_S;
+    c->stationary_dwell_ms = CYBERGEAR_STATIONARY_DWELL_MS;
+    c->startup_timeout_ms = CYBERGEAR_STARTUP_TIMEOUT_MS;
+    c->command_retry_ms = CYBERGEAR_COMMAND_RETRY_MS;
+    c->stop_timeout_ms = CYBERGEAR_STOP_TIMEOUT_MS;
+    c->stop_max_attempts = CYBERGEAR_STOP_MAX_ATTEMPTS;
+    c->planner_lead_ms = CYBERGEAR_PLANNER_LEAD_MS;
+    c->planner_timeout_ms = CYBERGEAR_PLANNER_TIMEOUT_MS;
+    c->operation_kp = CYBERGEAR_OPERATION_KP;
+    c->operation_kd = CYBERGEAR_OPERATION_KD;
+    c->operation_torque_limit_nm = CYBERGEAR_OPERATION_TORQUE_LIMIT_NM;
     c->dynamics = (CyberGearDynamicsConfig){
         .fixed_b0 = c->controller.b0_initial,
         .b0_min = c->controller.b0_min, .b0_max = c->controller.b0_max,
-        .b0_rate_limit = 1.0f, .posture_timeout_ms = 100U,
+        .b0_rate_limit = CYBERGEAR_B0_RATE_LIMIT,
+        .posture_timeout_ms = CYBERGEAR_POSTURE_TIMEOUT_MS,
         .acceleration_current_a = c->controller.current_limit_a,
         .braking_current_a = c->controller.current_limit_a,
-        .reserve_current_a = 0.5f * c->controller.current_limit_a,
+        .reserve_current_a = CYBERGEAR_DYNAMICS_RESERVE_CURRENT_FRACTION * c->controller.current_limit_a,
         .current_slew_a_s = fminf(c->controller.current_rise_a_s, c->controller.current_fall_a_s),
-        .reserve_slew_a_s = 2.5f,
+        .reserve_slew_a_s = CYBERGEAR_DYNAMICS_RESERVE_SLEW_A_S,
         .acceleration_cap_rad_s2 = c->trajectory.acceleration_max_rad_s2,
         .braking_cap_rad_s2 = c->trajectory.braking_max_rad_s2,
         .jerk_cap_rad_s3 = c->trajectory.jerk_max_rad_s3
@@ -527,6 +551,7 @@ bool cybergear_config_valid(const CyberGearConfig *c)
         positive(c->stationary_speed_rad_s) && c->stationary_speed_rad_s < c->speed_trip_rad_s &&
         c->tracking_timeout_ms > 0U && c->tracking_timeout_ms < 60000U &&
         c->saturation_timeout_ms > 0U && c->saturation_timeout_ms < 60000U &&
+        c->recovery_zero_ms >= c->controller.period_ms && c->recovery_zero_ms < 60000U &&
         c->stall_timeout_ms > 0U && c->stall_timeout_ms < 60000U &&
         c->stationary_dwell_ms > 0U && c->stationary_dwell_ms < 30000U &&
         c->startup_timeout_ms > c->stationary_dwell_ms * 2U &&
@@ -614,6 +639,7 @@ static void cybergear_latch_fault(CyberGearMotor *m, CyberGearFault reason)
     m->reset_confirmed = false;
     m->stationary = false;
     m->quiet_active = false;
+    m->recovery_zero_active = false;
     m->prepared_ready = false;
     m->plan_generation++;
     cybergear_controller_invalidate_input(&m->controller);
@@ -725,7 +751,7 @@ static bool begin_running(CyberGearMotor *m, uint32_t now)
     CgTrajectoryPoint origin = { .q_rad = m->feedback.position_rad };
     if (!cg_trajectory_reset(&m->trajectory, &origin, &m->effective_limits) ||
         !cybergear_controller_init(&m->controller, &m->config.controller,
-            origin.q_rad, 0.0f, now, m->feedback.rx_sequence, m->feedback.last_received_ms) ||
+            origin.q_rad, m->feedback.velocity_rad_s, now, m->feedback.rx_sequence, m->feedback.last_received_ms) ||
         !cybergear_controller_commit_queued(&m->controller, 0.0f, now)) return false;
     m->trajectory_start_ms = now;
     m->last_control_ms = now;
@@ -736,6 +762,9 @@ static bool begin_running(CyberGearMotor *m, uint32_t now)
     m->planning_fault = false;
     m->tracking_active = false;
     m->saturation_active = false;
+    m->recovery_count = 0U;
+    m->recovery_zero_active = false;
+    m->recovery_started_ms = 0U;
     m->stall_active = false;
     memset(&m->output, 0, sizeof(m->output));
     enter_state(m, CG_STATE_RUNNING, now);
@@ -797,7 +826,8 @@ static void startup_step(CyberGearMotor *m, uint32_t now)
         }
         break;
     case CG_STATE_WAIT_RUN:
-        if (m->feedback.rx_sequence != m->stop_rx_sequence && quiet_feedback(m, now, 2U)) {
+        if (m->feedback.rx_sequence != m->stop_rx_sequence &&
+            feedback_fresh(m, now) && m->feedback.mode == 2U) {
             if (!begin_running(m, now)) cybergear_latch_fault(m, CG_FAULT_MODEL);
         } else if (due) {
             ok = m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT ? cybergear_set_current(m, 0.0f) :
@@ -862,7 +892,7 @@ void cybergear_service(CyberGearMotor *m)
 {
     if (m == NULL) return;
     uint32_t mask = lock_state();
-    if (m->state != CG_STATE_RUNNING || m->prepared_ready || m->planning_fault ||
+    if (m->state != CG_STATE_RUNNING || m->recovery_zero_active || m->prepared_ready || m->planning_fault ||
         fabsf(m->requested_target_rad - m->trajectory.target_rad) <= m->effective_limits.target_tolerance_rad) {
         __set_PRIMASK(mask); return;
     }
@@ -881,7 +911,7 @@ void cybergear_service(CyberGearMotor *m)
     const bool ok = cg_trajectory_evaluate(&previous, (double)(activation - previous_start) * 0.001, &point) &&
         cg_trajectory_reset(&candidate, &point, &limits) && cg_trajectory_plan(&candidate, target, &limits);
     mask = lock_state();
-    if (m->state == CG_STATE_RUNNING && m->plan_generation == generation &&
+    if (m->state == CG_STATE_RUNNING && !m->recovery_zero_active && m->plan_generation == generation &&
         !time_reached(HAL_GetTick(), activation)) {
         if (ok) { m->prepared = candidate; m->prepared_start_ms = activation; m->prepared_ready = true; }
         else m->planning_fault = true;
@@ -899,11 +929,12 @@ static bool timed_condition(bool condition, bool *active, uint32_t *since, uint3
 static CyberGearFault running_protection(CyberGearMotor *m, uint32_t now)
 {
     const CyberGearConfig *c = &m->config;
+    if (m->recovery_zero_active) return CG_FAULT_NONE;
     const float error = fabsf(m->trajectory.point.q_rad - m->feedback.position_rad);
-    if (timed_condition(error > c->tracking_error_rad, &m->tracking_active, &m->tracking_since_ms,
-        now, c->tracking_timeout_ms)) return CG_FAULT_TRACKING;
-    if (timed_condition(m->output.amplitude_limited || m->output.slew_limited,
-        &m->saturation_active, &m->saturation_since_ms, now, c->saturation_timeout_ms)) return CG_FAULT_SATURATION;
+    const bool tracking = timed_condition(error > c->tracking_error_rad, &m->tracking_active, &m->tracking_since_ms,
+        now, c->tracking_timeout_ms);
+    const bool saturated = timed_condition(m->output.amplitude_limited || m->output.slew_limited,
+        &m->saturation_active, &m->saturation_since_ms, now, c->saturation_timeout_ms);
     if (error > c->tracking_error_rad && fabsf(m->controller.last_queued_current_a) >= c->stall_current_a) {
         if (!m->stall_active) {
             m->stall_active = true; m->stall_since_ms = now; m->stall_start_rad = m->feedback.position_rad;
@@ -911,6 +942,20 @@ static CyberGearFault running_protection(CyberGearMotor *m, uint32_t now)
             m->stall_since_ms = now; m->stall_start_rad = m->feedback.position_rad;
         } else if (now - m->stall_since_ms >= c->stall_timeout_ms) return CG_FAULT_STALL;
     } else m->stall_active = false;
+    if (tracking || saturated) {
+        if (tracking && (!c->recover_on_tracking || m->requested_mode != CYBERGEAR_RUN_MODE_CURRENT))
+            return CG_FAULT_TRACKING;
+        if (saturated && (!c->recover_on_saturation || m->requested_mode != CYBERGEAR_RUN_MODE_CURRENT))
+            return CG_FAULT_SATURATION;
+        m->recovery_started_ms = now;
+        m->recovery_zero_active = true;
+        m->prepared_ready = false;
+        m->plan_generation++;
+        m->tracking_active = false;
+        m->saturation_active = false;
+        m->stall_active = false;
+        if (m->recovery_count < UINT32_MAX) m->recovery_count++;
+    }
     return CG_FAULT_NONE;
 }
 
@@ -921,12 +966,11 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
     const uint32_t elapsed = now - m->last_control_ms;
     FDCAN_ProtocolStatusTypeDef bus;
     FDCAN_ErrorCountersTypeDef counters;
-    if (HAL_FDCAN_GetProtocolStatus(m->hfdcan, &bus) != HAL_OK ||
-        HAL_FDCAN_GetErrorCounters(m->hfdcan, &counters) != HAL_OK) {
-        cybergear_latch_fault(m, CG_FAULT_BUS);
-    } else {
-        m->bus_off = bus.BusOff != 0U; m->tec = counters.TxErrorCnt; m->rec = counters.RxErrorCnt;
-        if (m->bus_off || bus.ErrorPassive != 0U || m->tec != 0U) cybergear_latch_fault(m, CG_FAULT_BUS);
+    if (HAL_FDCAN_GetProtocolStatus(m->hfdcan, &bus) == HAL_OK) {
+        m->bus_off = bus.BusOff != 0U;
+    }
+    if (HAL_FDCAN_GetErrorCounters(m->hfdcan, &counters) == HAL_OK) {
+        m->tec = counters.TxErrorCnt; m->rec = counters.RxErrorCnt;
     }
     if (m->state == CG_STATE_STOPPING || m->state == CG_STATE_FAULT) {
         service_stop(m, now); record_log(m, now, elapsed); return false;
@@ -974,12 +1018,31 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
              * activation slot; invalidating it on every 10 ms target would
              * starve a 50 ms lookahead forever. Newest target is planned next. */
         }
+        if (m->recovery_zero_active && now - m->recovery_started_ms >= m->config.recovery_zero_ms) {
+            const CgTrajectoryPoint origin = { .q_rad = m->feedback.position_rad };
+            if (origin.q_rad < m->effective_limits.position_min_rad ||
+                origin.q_rad > m->effective_limits.position_max_rad) {
+                cybergear_latch_fault(m, CG_FAULT_POSITION); goto done;
+            }
+            if (!cg_trajectory_reset(&m->trajectory, &origin, &m->effective_limits)) {
+                cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done;
+            }
+            m->trajectory_start_ms = now;
+            m->requested_since_ms = now;
+            m->prepared_ready = false;
+            m->plan_generation++;
+            m->tracking_active = false;
+            m->saturation_active = false;
+            m->stall_active = false;
+            m->recovery_zero_active = false;
+        }
         if (m->planning_fault) { cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done; }
-        if (m->prepared_ready && time_reached(now, m->prepared_start_ms)) {
+        if (!m->recovery_zero_active && m->prepared_ready && time_reached(now, m->prepared_start_ms)) {
             m->trajectory = m->prepared; m->trajectory_start_ms = m->prepared_start_ms;
             m->prepared_ready = false; m->plan_generation++; m->requested_since_ms = now;
         }
-        if (fabsf(m->requested_target_rad - m->trajectory.target_rad) > m->effective_limits.target_tolerance_rad &&
+        if (!m->recovery_zero_active &&
+            fabsf(m->requested_target_rad - m->trajectory.target_rad) > m->effective_limits.target_tolerance_rad &&
             now - m->requested_since_ms > m->config.planner_timeout_ms) {
             cybergear_latch_fault(m, CG_FAULT_PLANNER); goto done;
         }
@@ -1019,6 +1082,14 @@ bool cybergear_control_position_adrc(CyberGearMotor *m, float target)
         m->last_control_ms = now;
         const CyberGearFault protection = running_protection(m, now);
         if (protection != CG_FAULT_NONE) { cybergear_latch_fault(m, protection); goto done; }
+        if (m->recovery_zero_active) {
+            cybergear_controller_reset_adaptation(&m->controller);
+            m->dynamics.b0 = m->config.dynamics.fixed_b0;
+            m->controller.disturbance_current_a = 0.0f;
+            m->output.current_a = 0.0f;
+            m->output.disturbance_current_a = 0.0f;
+            m->output.gamma = 0.0f;
+        }
         m->internal_send = true;
         bool sent;
         if (m->requested_mode == CYBERGEAR_RUN_MODE_CURRENT) sent = cybergear_set_current(m, m->output.current_a);
