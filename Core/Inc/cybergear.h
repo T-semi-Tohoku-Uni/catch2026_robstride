@@ -84,6 +84,9 @@ typedef struct {
     float tracking_error_rad;         /* |qd-q| の許容 [rad]。最終目標からの距離ではない。 */
     uint32_t tracking_timeout_ms;     /* 誤差超過の連続時間 [ms]。移動の正常遅れより長く。 */
     uint32_t saturation_timeout_ms;   /* 振幅/スルー飽和が続く上限 [ms]。0で無効にはしない。 */
+    bool recover_on_saturation;
+    bool recover_on_tracking;
+    uint32_t recovery_zero_ms;
     float stall_current_a;            /* 拘束疑い電流 [A]。正常保持電流より大きく、Imax以下。 */
     float stall_progress_rad;         /* 拘束観測窓内の最小移動 [rad]。量子化幅より大きく。 */
     uint32_t stall_timeout_ms;        /* 誤差と電流があるのに進行しない観測窓 [ms]。 */
@@ -142,6 +145,8 @@ typedef struct
     uint32_t stop_started_ms, stop_rx_sequence, stop_attempts, stop_last_sequence;
     uint32_t quiet_since_ms, quiet_last_sequence;
     uint32_t tracking_since_ms, saturation_since_ms, stall_since_ms;
+    uint32_t recovery_count, recovery_started_ms;
+    bool recovery_zero_active;
     float requested_target_rad, stall_start_rad;
     bool managed, internal_send, prepared_ready, planning_fault, quiet_active, first_cyclic;
     bool tracking_active, saturation_active, stall_active;

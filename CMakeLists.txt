@@ -66,19 +66,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_controller.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_trajectory.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_dynamics.c"
-    "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_test_motion.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/robstride_app.c"
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
-)
-
-# Add project symbols (macros)
-option(APP_CYBERGEAR_STANDALONE_TEST "Run only the CyberGear homing and motion test" OFF)
-target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    APP_CYBERGEAR_STANDALONE_TEST=$<BOOL:${APP_CYBERGEAR_STANDALONE_TEST}>
 )
 
 # Remove wrong libob.a library dependency when using cpp files

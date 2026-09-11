@@ -2,20 +2,16 @@
 
 STM32G474RBTx 向けのモーター制御ファームウェアです。
 
-既定ビルドは **通常の4軸制御** です。CAN ID `0x500` の開始指令が0→1に変化すると、
+このブランチは **通常の4軸制御** 用です。CAN ID `0x500` の開始指令が0→1に変化すると、
 CyberGearを原点探索し、RobStride全3軸とCyberGearの起動確認後に周期制御を開始します。
-CyberGear単体試験はCMakeの `-DAPP_CYBERGEAR_STANDALONE_TEST=ON` で明示的に選びます。
-[統合修正と空試験](docs/09_統合修正と空試験.md)にブランチの取込み内容と検証手順をまとめています。
 
-CyberGearの設定は[簡易設定手順](docs/07_CyberGear簡易設定手順.md)から始めてください。
-改修内容、実機必須パラメーター、詳しい調整方法は
-[実装・調整説明](docs/05_CyberGear実装と調整.md)を参照してください。
-ユーザー指示により、停止距離の予測保護モデル全体をいったん省略しました。
-停止距離の計算・運転中の判定・起動時の整合性検査・専用パラメーターを削除しています。
-角度・速度・電流・温度・通信・追従・拘束の保護とSTOP処理、ADRC・軌道・慣性モデルは維持します。
-通常6 A・単体3 Aを停止距離の式で起動拒否する条件はありません。
-[現在の設定条件](docs/controller_parameters.md)を参照してください。実機なしの検証は
-`powershell -ExecutionPolicy Bypass -File tests/run_host_tests.ps1` で実行できます。
+パラメーターは `Core/Inc/cybergear_config.h` で管理し、現在の値と制御動作は
+[制御パラメーター](docs/controller_parameters.md)を参照してください。
+単体往復試験、UART調整コンソール、ホスト試験コードはこのブランチに含みません。
+試験は `test/cybergear-swing-60-5` で行い、確認済みのパラメーターと制御変更を
+`control/cybergear-production` に取り出してから `20_cybergear_fix` にマージします。
+[取込み手順](docs/cybergear_promotion.md)にブランチの役割と差分の選び方をまとめています。
+番号付きの改修資料や過去の試験結果は履歴資料であり、現在の設定・操作手順は上記2資料を優先します。
 
 ## Git で管理するもの
 
@@ -69,10 +65,12 @@ Bank 2、起動コード・その他のコード・RAM初期値をBank 1へ配�
 各バンクの64 KB超過はリンク時にエラーになります。制御定数やDBANK自体は変更しません。
 CubeMX再生成後も、このスクリプトを使用するルートCMakeを維持してください。
 
-ビルド後の配置確認（実機接続不要）:
+ビルド後の配置確認（実機接続不要）は、試験ブランチに残した
+`tests/check_flash_layout.py` を使います。試験ブランチの作業ディレクトリで、
+このブランチから生成したELFのパスを渡してください。
 
-```powershell
-python tests/check_flash_layout.py build/Debug/catch2026_robstride.elf build/Release/catch2026_robstride.elf
+```sh
+python tests/check_flash_layout.py /path/to/production/build/Debug/catch2026_robstride.elf /path/to/production/build/Release/catch2026_robstride.elf
 ```
 
 Bank 2の末尾は16バイト境界まで埋めます。CubeProgrammer 2.23.0の実機ログでは、

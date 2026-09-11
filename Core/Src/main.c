@@ -29,8 +29,6 @@
 #include "robstride_startup.h"
 #include "board_protocol.h"
 #include "cybergear.h"
-#include "app_mode.h"
-#include "cybergear_test_motion.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,14 +43,14 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define HOST_ID 0xfe
+#define HOST_ID CYBERGEAR_HOST_ID
 
 #define RIGHT_RS03_ID 3
 #define LEFT_RS03_ID 4
 
 #define EL05_ID 5
 
-#define CYBER_GEAR_ID 0x7f
+#define CYBER_GEAR_ID CYBERGEAR_MOTOR_ID
 
 
 #define RIGHT_RS03_INDEX 0
@@ -62,14 +60,7 @@
 
 #define CANID 0x200
 #define MOTOR_INIT_CANID 0x500
-#define CYBERGEAR_DEBUG_INTERVAL_MS 200U
 #define EL05_DEBUG_INTERVAL_MS 200U
-#define MOTOR_INIT_FEEDBACK_TIMEOUT_MS 3000U
-#define CYBERGEAR_HOMING_REVERSE_ANGLE_RAD 1.0471975512f /* 60 degrees */
-#define CYBERGEAR_HOMING_SLOW_SPEED_RAD_S 0.4f
-#define CYBERGEAR_HOMING_CLEARANCE_RAD 0.034906585f /* 2 degrees beyond each edge */
-#define CYBERGEAR_HOMING_FEEDBACK_TIMEOUT_MS 100U
-#define CYBERGEAR_HOMING_PHASE_TIMEOUT_MS 15000U
 #define MOTOR_RETURN_IGNORE_MS 2000U
 #define MOTOR_STOP_TIMEOUT_MS 1000U
 /* USER CODE END PM */
@@ -99,7 +90,6 @@ static volatile uint32_t motor_can_rx_count = 0U;
 static volatile uint32_t motor_can_last_rx_id = 0U;
 static volatile uint32_t motor_can_last_rx_dlc = 0U;
 static volatile uint32_t motor_can_last_rx_id_type = 0U;
-static CyberGearTestMotion cybergear_test_motion;
 static RobstrideStartup robstride_startup;
 /* USER CODE END PV */
 
@@ -144,7 +134,7 @@ static void motor_init_print_can_status(void)
 
 static void motor_check_feedback(void)
 {
-  if (APP_CYBERGEAR_STANDALONE_TEST || !motors_running) return;
+  if (!motors_running) return;
   const uint32_t interrupt_mask = __get_PRIMASK();
   __disable_irq();
   const uint32_t now_ms = HAL_GetTick();
@@ -374,7 +364,7 @@ static bool cybergear_homing_clear_edge(float direction)
       printf("CG home clearance TX failed\r\n");
       return false;
     }
-    HAL_Delay(10);
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
     if (!cybergear_homing_feedback(&feedback))
     {
       return false;
@@ -397,7 +387,7 @@ static bool cybergear_homing_measure_edge(float direction, float *edge_rad)
   const uint32_t started_ms = HAL_GetTick();
   bool edge_pending = false;
   uint32_t edge_started_ms = 0U;
-  HAL_Delay(10);
+  HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   while ((uint32_t)(HAL_GetTick() - started_ms) < CYBERGEAR_HOMING_PHASE_TIMEOUT_MS)
   {
     CyberGearFeedback feedback;
@@ -411,12 +401,12 @@ static bool cybergear_homing_measure_edge(float direction, float *edge_rad)
     {
       if (!edge_pending)
       {
-        /* Keep the first crossing angle, then confirm the switch for 20 ms. */
+        /* Keep the first crossing angle, then confirm the switch state. */
         *edge_rad = feedback.position_rad;
         edge_started_ms = HAL_GetTick();
         edge_pending = true;
       }
-      if ((uint32_t)(HAL_GetTick() - edge_started_ms) >= 20U)
+      if ((uint32_t)(HAL_GetTick() - edge_started_ms) >= CYBERGEAR_HOMING_DEBOUNCE_MS)
       {
         return true;
       }
@@ -431,7 +421,7 @@ static bool cybergear_homing_measure_edge(float direction, float *edge_rad)
       printf("CG home edge TX failed\r\n");
       return false;
     }
-    HAL_Delay(10);
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   }
   cybergear_stop(&cybergear_base);
   printf("CG home edge timeout\r\n");
@@ -473,7 +463,7 @@ static bool cybergear_homing_move_to_center(float center_rad)
       motor_init_print_can_status();
       return false;
     }
-    HAL_Delay(10);
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   }
   cybergear_stop(&cybergear_base);
   printf("CG home center timeout: pos=%.5f target=%.5f rad\r\n",
@@ -490,7 +480,7 @@ bool cybergear_homing(void)
   {
     return false;
   }
-  HAL_Delay(10);
+  HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   if (!cybergear_set_velocity(&cybergear_base, 0.0f))
   {
     cybergear_stop(&cybergear_base);
@@ -519,13 +509,13 @@ bool cybergear_homing(void)
     {
       break;
     }
-    if ((uint32_t)(now_ms - feedback_wait_started_ms) >= MOTOR_INIT_FEEDBACK_TIMEOUT_MS)
+    if ((uint32_t)(now_ms - feedback_wait_started_ms) >= CYBERGEAR_HOMING_STARTUP_TIMEOUT_MS)
     {
       cybergear_stop(&cybergear_base);
       return false;
     }
     /* Retry a lost enable response while the speed reference is still zero. */
-    if ((uint32_t)(now_ms - last_enable_ms) >= 100U)
+    if ((uint32_t)(now_ms - last_enable_ms) >= CYBERGEAR_HOMING_PROBE_INTERVAL_MS)
     {
       if (!cybergear_enable(&cybergear_base))
       {
@@ -535,7 +525,7 @@ bool cybergear_homing(void)
       }
       last_enable_ms = now_ms;
     }
-    HAL_Delay(10);
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   }
   if (feedback.fault_flags != 0U)
   {
@@ -549,7 +539,7 @@ bool cybergear_homing(void)
   const uint32_t search_started_ms = HAL_GetTick();
   const GPIO_PinState initial_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
 
-  if (!cybergear_set_velocity(&cybergear_base, 1.0f))
+  if (!cybergear_set_velocity(&cybergear_base, CYBERGEAR_HOMING_FAST_SPEED_RAD_S))
   {
     cybergear_stop(&cybergear_base);
     return false;
@@ -564,7 +554,7 @@ bool cybergear_homing(void)
       return false;
     }
 
-    /* Reverse once if the switch has not changed after 60 degrees. */
+    /* Reverse once if the switch has not changed within the search angle. */
     if (!reversed &&
         feedback.position_rad - start_position_rad >= CYBERGEAR_HOMING_REVERSE_ANGLE_RAD &&
         HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == initial_state)
@@ -572,12 +562,12 @@ bool cybergear_homing(void)
       direction = -1.0f;
       reversed = true;
     }
-    if (!cybergear_set_velocity(&cybergear_base, direction))
+    if (!cybergear_set_velocity(&cybergear_base, direction * CYBERGEAR_HOMING_FAST_SPEED_RAD_S))
     {
       cybergear_stop(&cybergear_base);
       return false;
     }
-    HAL_Delay(10); 
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   }
 
   /* Discard the fast crossing; measure switch crossings at low speed both ways. */
@@ -621,13 +611,13 @@ bool cybergear_homing(void)
     return false;
   }
   /* Allow STOP to be sent before setting zero; no position/settling check. */
-  HAL_Delay(10);
+  HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
 
   if (!cybergear_set_zero(&cybergear_base))
   {
     return false;
   }
-  HAL_Delay(10);
+  HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
 
   printf("CG home edges=%.4f,%.4f center=%.4f rad\r\n",
          (double)reverse_edge_rad, (double)forward_edge_rad, (double)center_rad);
@@ -656,12 +646,16 @@ static void motor_prepare_handlers(void)
 
 bool cybergear_base_init(void)
 {
-  if (!cybergear_init(
+  const uint32_t init_mask = __get_PRIMASK();
+  __disable_irq();
+  const bool initialized = cybergear_init(
     &cybergear_base,
     &hfdcan3,
     CYBER_GEAR_ID,
     HOST_ID
-  ))
+  );
+  __set_PRIMASK(init_mask);
+  if (!initialized)
   {
     return false;
   }
@@ -676,7 +670,7 @@ bool cybergear_base_init(void)
   /* Establish feedback before enabling motion. A queued frame is not proof
      of delivery, so retry STOP while the motor is powering up. */
   const uint32_t wait_started_ms = HAL_GetTick();
-  uint32_t last_probe_ms = wait_started_ms - 100U;
+  uint32_t last_probe_ms = wait_started_ms - CYBERGEAR_HOMING_PROBE_INTERVAL_MS;
   while (1)
   {
     const uint32_t interrupt_mask = __get_PRIMASK();
@@ -696,19 +690,20 @@ bool cybergear_base_init(void)
       break;
     }
     motor_check_feedback();
-    if ((uint32_t)(now_ms - wait_started_ms) >= MOTOR_INIT_FEEDBACK_TIMEOUT_MS)
+    if ((uint32_t)(now_ms - wait_started_ms) >= CYBERGEAR_HOMING_STARTUP_TIMEOUT_MS)
     {
       printf("CG startup: no feedback from ID 0x%02X\r\n", CYBER_GEAR_ID);
       motor_init_print_can_status();
       return false;
     }
-    if ((uint32_t)(now_ms - last_probe_ms) >= 100U)
+    if ((uint32_t)(now_ms - last_probe_ms) >= CYBERGEAR_HOMING_PROBE_INTERVAL_MS)
     {
       /* A full queue is retried on the next probe without enabling the motor. */
       cybergear_stop(&cybergear_base);
       last_probe_ms = now_ms;
     }
-    HAL_Delay(10);
+
+    HAL_Delay(CYBERGEAR_HOMING_POLL_MS);
   }
 
 
@@ -743,113 +738,6 @@ static bool motor_start_control(void)
     if (!cybergear_ok || robstride_startup_failed(&robstride_startup)) return false;
     cybergear_service(&cybergear_base);
     HAL_Delay(cybergear_base.config.controller.period_ms);
-  }
-}
-
-static void cybergear_test_status(void)
-{
-  static uint32_t last_print_ms = 0U;
-  const uint32_t now_ms = HAL_GetTick();
-  if ((uint32_t)(now_ms - last_print_ms) < 500U) return;
-  last_print_ms = now_ms;
-  const uint32_t interrupt_mask = __get_PRIMASK();
-  __disable_irq();
-  const CyberGearFeedback feedback = cybergear_base.feedback;
-  const CyberGearState state = cybergear_base.state;
-  const CyberGearFault fault = cybergear_base.fault;
-  const float target_rad = target_angle[0];
-  const float current_a = cybergear_base.controller.last_queued_current_a;
-  const uint32_t sample_ms = HAL_GetTick();
-  __set_PRIMASK(interrupt_mask);
-  HAL_GPIO_TogglePin(Board_LED_GPIO_Port, Board_LED_Pin);
-  printf("CG TEST " CG_TEST_FIRMWARE_TAG " state=%u fault=%u online=%u age=%lu\r\n",
-         (unsigned int)state, (unsigned int)fault, (unsigned int)feedback.online,
-         (unsigned long)(sample_ms - feedback.last_received_ms));
-  printf("CG TEST q=%.4f v=%.4f target=%.4f limit=%u\r\n",
-         (double)feedback.position_rad, (double)feedback.velocity_rad_s,
-         (double)target_rad,
-         (unsigned int)HAL_GPIO_ReadPin(limit_GPIO_Port, limit_Pin));
-  printf("CG TEST i_cmd=%.3f halted=%u legs=%lu\r\n", (double)current_a,
-         (unsigned int)cybergear_test_motion.halted,
-         (unsigned long)cybergear_test_motion.completed_legs);
-}
-
-static void cybergear_test_halt(const char *reason)
-{
-  cybergear_test_motion.halted = true;
-  printf("CG TEST FAILED: %s; reset required to retry\r\n", reason);
-  motor_init_print_can_status();
-  cybergear_stop(&cybergear_base);
-  uint32_t stop_attempts = 1U;
-  uint32_t last_stop_ms = HAL_GetTick();
-  /* No timer has been started on these failure paths. Service bounded STOP
-   * retries here, then remain faulted; never automatically re-enable. */
-  while (1)
-  {
-    if (cybergear_base.managed)
-    {
-      cybergear_control_position_adrc(&cybergear_base, 0.0f);
-    }
-    else if (stop_attempts < 20U && (uint32_t)(HAL_GetTick() - last_stop_ms) >= 50U)
-    {
-      cybergear_stop(&cybergear_base);
-      stop_attempts++;
-      last_stop_ms = HAL_GetTick();
-    }
-    cybergear_test_status();
-    HAL_Delay(10);
-  }
-}
-
-static void cybergear_standalone_test_run(void)
-{
-  printf("CG TEST: " CG_TEST_FIRMWARE_TAG "; homing then +/-30 deg; RobStride TX disabled\r\n");
-  printf("CG TEST: inter-board commands ignored; motor=0x%02X host=0x%02X\r\n",
-         CYBER_GEAR_ID, HOST_ID);
-  if (!cybergear_base_init()) cybergear_test_halt("startup/config/feedback");
-  printf("CG TEST: homing started\r\n");
-  if (!cybergear_homing()) cybergear_test_halt("homing");
-  if (!cybergear_test_configure(&cybergear_base)) cybergear_test_halt("test config");
-  target_angle[0] = 0.0f;
-  if (!cybergear_start_position_adrc(&cybergear_base)) cybergear_test_halt("ADRC start");
-  cybergear_test_motion_init(&cybergear_test_motion, HAL_GetTick());
-  target_angle[0] = cybergear_test_motion.target_rad;
-  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK) cybergear_test_halt("timer start");
-  printf("CG TEST: homing complete; +/-30 deg, dwell=1000 ms\r\n");
-  printf("CG TEST: ADRC current<=%.1f A, speed<=%.1f rad/s; x=stop\r\n",
-         (double)cybergear_base.config.controller.current_limit_a,
-         (double)cybergear_base.config.trajectory.velocity_max_rad_s);
-  while (1)
-  {
-    uint8_t command;
-    const bool stop_requested = HAL_UART_Receive(&huart2, &command, 1U, 0U) == HAL_OK &&
-        (command == 'x' || command == 'X');
-    /* Keep snapshot, target change and STOP request atomic with TIM6. */
-    const uint32_t mask = __get_PRIMASK();
-    __disable_irq();
-    const uint32_t now_ms = HAL_GetTick();
-    const bool fresh = cybergear_base.feedback.online &&
-        (uint32_t)(now_ms - cybergear_base.feedback.last_received_ms) <=
-        cybergear_base.config.controller.feedback_timeout_ms;
-    const bool trajectory_done = !cybergear_base.trajectory.active && !cybergear_base.prepared_ready &&
-        fabsf(cybergear_base.trajectory.target_rad - target_angle[0]) <=
-        cybergear_base.effective_limits.target_tolerance_rad &&
-        fabsf(cybergear_base.requested_target_rad - target_angle[0]) <=
-        cybergear_base.effective_limits.target_tolerance_rad;
-    const CyberGearTestResult result = cybergear_test_motion_update(&cybergear_test_motion,
-        now_ms, cybergear_base.state == CG_STATE_RUNNING && !stop_requested, fresh,
-        trajectory_done, cybergear_base.feedback.position_rad, cybergear_base.controller.velocity_rad_s);
-    if (result == CG_TEST_NEW_TARGET) target_angle[0] = cybergear_test_motion.target_rad;
-    else if (result >= CG_TEST_STOP_FAULT) cybergear_stop(&cybergear_base);
-    __set_PRIMASK(mask);
-    if (result == CG_TEST_NEW_TARGET)
-        printf("CG TEST: new target=%.4f rad\r\n", (double)cybergear_test_motion.target_rad);
-    else if (result >= CG_TEST_STOP_FAULT)
-        printf("CG TEST: halted reason=%u user_stop=%u; reset to retry\r\n",
-               (unsigned int)result, (unsigned int)stop_requested);
-    cybergear_service(&cybergear_base);
-    cybergear_test_status();
-    HAL_Delay(1);
   }
 }
 
@@ -937,9 +825,6 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
       break;
     }
 
-    /* Drain the FIFO without allowing external commands to change the test. */
-    if (APP_CYBERGEAR_STANDALONE_TEST) continue;
-
     switch (rxheader.Identifier)
     {
       case MOTOR_INIT_CANID:
@@ -1018,7 +903,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
-  if (htim == &htim6 && (APP_CYBERGEAR_STANDALONE_TEST || motors_running)) {
+  if (htim == &htim6 && motors_running) {
     static uint8_t control_phase = 0U;
 
     /* CG can use phase 0/5. Other axes and the board reply retain all phases. */
@@ -1026,7 +911,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     {
       cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
     }
-    if (!APP_CYBERGEAR_STANDALONE_TEST) switch (control_phase)
+    switch (control_phase)
     {
       case 1U:
         robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], target_angle[2] - 1.884f);
@@ -1047,9 +932,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
       return;
     }
     control_phase = 0U;
-
-    /* The standalone test needs no other board or CAN1 acknowledgement. */
-    if (APP_CYBERGEAR_STANDALONE_TEST) return;
 
     float send_angles[4] = {0};
     uint8_t txdata[16] = {0};
@@ -1121,8 +1003,6 @@ int main(void)
     motor_init_failed("CAN setup");
     return 1;
   }
-
-  if (APP_CYBERGEAR_STANDALONE_TEST) cybergear_standalone_test_run();
 
   /* CAN reception is active; defer homing, enable and cyclic commands. */
   while (!motor_init_requested)
@@ -1363,7 +1243,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 115200;
+  huart2.Init.BaudRate = CYBERGEAR_UART_BAUD_RATE;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -1454,7 +1334,7 @@ static void MX_GPIO_Init(void)
 
 int _write(int file,char *ptr,int len)
 {
-  HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, 10);
+  HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, CYBERGEAR_UART_TX_TIMEOUT_MS);
   return len;
 }
 /* USER CODE END 4 */
