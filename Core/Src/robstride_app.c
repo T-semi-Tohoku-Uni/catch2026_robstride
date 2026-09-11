@@ -210,10 +210,10 @@ void robstride_parse_feedback(
 	feedback->fault_flags = (uint8_t)((data2 >> 8) & 0x3f);
 	feedback->mode = (uint8_t)((data2 >> 14) & 0x03);
 
-	feedback->position_rad = robstride_u16_to_float(position_raw, -12.57, 12.57);
+	feedback->position_rad = robstride_u16_to_float(position_raw, -12.57f, 12.57f);
 	feedback->velocity_rps = robstride_u16_to_float(velocity_raw, -20.0f, 20.0f);
 	feedback->torqe_nm = robstride_u16_to_float(torque_raw, -60.0f, 60.0f);
-	feedback->temperature_c = (float)temp_raw / 10.0;
+	feedback->temperature_c = (float)temp_raw / 10.0f;
 	feedback->last_leceived_ms = HAL_GetTick();
 	feedback->online = true;
 	++feedback->received_count;
@@ -553,13 +553,11 @@ bool robstride_start_position_csp_mode(
 
 bool robstride_set_zero(RobstrideMotor *motor)
 {
-    uint8_t data[8] = {0};
-    
-    // Set Zero の通信タイプ（仮に0x03とする。仕様書に合わせてください）
-    const uint8_t set_zero_comm_type = 0x03; 
+    /* Private CAN protocol: type 6, byte 0 = 1. Call with motor stopped. */
+    uint8_t data[8] = {1};
 
     const uint32_t id = robstride_make_can_id(
-        set_zero_comm_type, motor->host_id, motor->motor_id
+        ResetPosId, motor->host_id, motor->motor_id
     );
 
     if (!send_robstride(motor, id, data))

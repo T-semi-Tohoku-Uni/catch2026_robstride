@@ -377,9 +377,10 @@ void motor_app_control_tick(TIM_HandleTypeDef *htim)
 {
   if (htim == &htim6)
   {
-    static uint8_t control_phase = 0U;
+    static uint32_t control_phase = 0U;
+    static uint32_t board_feedback_ticks = 0U;
 
-    /* Stagger four commands across 1 ms ticks; each motor runs at 10 ms. */
+    /* Stagger four commands across 1 ms ticks; each motor runs at 5 ms. */
     switch (control_phase)
     {
       case 0U:
@@ -405,11 +406,18 @@ void motor_app_control_tick(TIM_HandleTypeDef *htim)
     }
 
     control_phase++;
-    if (control_phase < MOTOR_CONTROL_PHASE_COUNT)
+    if (control_phase >= MOTOR_CONTROL_PHASE_COUNT)
+    {
+      control_phase = 0U;
+    }
+
+    /* Board replies have an independent interval, currently also 5 ms. */
+    board_feedback_ticks++;
+    if (board_feedback_ticks < BOARD_FEEDBACK_INTERVAL_MS)
     {
       return;
     }
-    control_phase = 0U;
+    board_feedback_ticks = 0U;
 
     float send_angles[BOARD_AXIS_COUNT] = {0};
     uint8_t txdata[BOARD_ANGLE_PAYLOAD_BYTES] = {0};

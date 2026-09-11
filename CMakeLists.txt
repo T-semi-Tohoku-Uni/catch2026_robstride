@@ -43,9 +43,15 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 # Add sources to executable
+option(RS03_HOMING_ONLY "Build the standalone left/right GPIO zero-setting firmware" ON)
+if(RS03_HOMING_ONLY)
+    set(MOTOR_APP_SOURCE Core/Src/rs03_homing_app.c)
+else()
+    set(MOTOR_APP_SOURCE Core/Src/motor_app.c)
+endif()
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "${CMAKE_SOURCE_DIR}/Core/Src/board_protocol.c"
-    "${CMAKE_SOURCE_DIR}/Core/Src/motor_app.c"
+    "${CMAKE_SOURCE_DIR}/${MOTOR_APP_SOURCE}"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear_homing.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/can_init.c"
     "${CMAKE_SOURCE_DIR}/Core/Src/cybergear.c"
