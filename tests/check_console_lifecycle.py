@@ -354,6 +354,15 @@ int main(void)
     assert(timer_starts == 1U && cybergear_test_timer_active && motion_calls == 2U);
     assert(target_angle[0] == cybergear_test_motion.target_rad);
 
+    cybergear_base.trajectory.active = false;
+    cybergear_base.prepared_ready = false;
+    cybergear_base.trajectory.target_rad = target_angle[0];
+    cybergear_base.requested_target_rad = target_angle[0];
+    cybergear_base.effective_limits.target_tolerance_rad = 0.0001f;
+    assert(cybergear_test_trajectory_done());
+    cybergear_base.recovery_zero_active = true;
+    assert(!cybergear_test_trajectory_done());
+
     prepare();
     timer_start_status = HAL_ERROR;
     assert(!cybergear_test_start());
@@ -373,6 +382,7 @@ def main():
         "static bool cybergear_test_can_ready(",
         "static bool cybergear_test_reinitialize(",
         "static bool cybergear_test_start(",
+        "static bool cybergear_test_trajectory_done(",
     ))
     generated = output / "console_lifecycle_generated.c"
     generated.write_text(PREFIX + helpers + SUFFIX, encoding="utf-8")

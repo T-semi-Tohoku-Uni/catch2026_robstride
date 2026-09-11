@@ -16,6 +16,7 @@ add_executable(cybergear_host_tests
     ../Core/Src/cybergear_dynamics.c ../Core/Src/cybergear_trajectory.c ../Core/Src/cybergear_test_motion.c
     ../Core/Src/cybergear_tuning.c ../Core/Src/cybergear_console.c)
 target_include_directories(cybergear_host_tests PRIVATE stubs ../Core/Inc)
+target_compile_definitions(cybergear_host_tests PRIVATE CYBERGEAR_HOST_IRQ_HOOK)
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(cybergear_host_tests PRIVATE
         -Wall -Wextra -Wpedantic -Werror -fno-fast-math -UNDEBUG)
@@ -26,6 +27,9 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 endif()
 add_test(NAME cybergear_host_tests COMMAND cybergear_host_tests)
+add_test(NAME cybergear_saturation_recovery COMMAND cybergear_host_tests saturation)
+add_test(NAME cybergear_bus_monitoring COMMAND cybergear_host_tests bus)
+add_test(NAME cybergear_startup_handoff COMMAND cybergear_host_tests startup)
 
 # Compile the real RobStride driver against a host HAL, suppressing the
 # CubeMX main.h contents (GPIO/startup declarations are irrelevant here).

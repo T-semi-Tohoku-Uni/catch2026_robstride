@@ -53,7 +53,12 @@ uint32_t HAL_FDCAN_GetError(const FDCAN_HandleTypeDef *hfdcan);
 
 static inline uint32_t __get_PRIMASK(void) { return 0U; }
 static inline void __disable_irq(void) {}
+#ifdef CYBERGEAR_HOST_IRQ_HOOK
+void cybergear_test_restore_irq(uint32_t mask);
+static inline void __set_PRIMASK(uint32_t mask) { cybergear_test_restore_irq(mask); }
+#else
 static inline void __set_PRIMASK(uint32_t mask) { (void)mask; }
+#endif
 static inline void __DMB(void) {}
 
 #endif

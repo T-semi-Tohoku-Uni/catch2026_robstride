@@ -12,7 +12,20 @@ static unsigned int tx_count;
 static uint32_t tick_ms, fifo_free;
 static HAL_StatusTypeDef send_status;
 static bool bus_off;
+static bool bus_passive, bus_warning;
+static uint32_t bus_tx_errors, bus_rx_errors;
+static HAL_StatusTypeDef bus_status_result, bus_counters_result;
 static FDCAN_HandleTypeDef can;
+static void (*irq_restore_hook)(void);
+static CyberGearMotor *planning_race_motor;
+
+void cybergear_test_restore_irq(uint32_t mask)
+{
+    (void)mask;
+    void (*hook)(void) = irq_restore_hook;
+    irq_restore_hook = NULL;
+    if (hook != NULL) hook();
+}
 
 uint32_t HAL_GetTick(void) { return tick_ms; }
 void HAL_Delay(uint32_t ms) { tick_ms += ms; }
@@ -20,10 +33,23 @@ uint32_t HAL_FDCAN_GetTxFifoFreeLevel(const FDCAN_HandleTypeDef *handle)
 { (void)handle; return fifo_free; }
 HAL_StatusTypeDef HAL_FDCAN_GetProtocolStatus(const FDCAN_HandleTypeDef *handle,
     FDCAN_ProtocolStatusTypeDef *status)
-{ (void)handle; memset(status, 0, sizeof(*status)); status->BusOff = bus_off; return HAL_OK; }
+{
+    (void)handle;
+    memset(status, 0, sizeof(*status));
+    status->BusOff = bus_off;
+    status->ErrorPassive = bus_passive;
+    status->Warning = bus_warning;
+    return bus_status_result;
+}
 HAL_StatusTypeDef HAL_FDCAN_GetErrorCounters(const FDCAN_HandleTypeDef *handle,
     FDCAN_ErrorCountersTypeDef *counters)
-{ (void)handle; memset(counters, 0, sizeof(*counters)); return HAL_OK; }
+{
+    (void)handle;
+    memset(counters, 0, sizeof(*counters));
+    counters->TxErrorCnt = bus_tx_errors;
+    counters->RxErrorCnt = bus_rx_errors;
+    return bus_counters_result;
+}
 uint32_t HAL_FDCAN_GetError(const FDCAN_HandleTypeDef *handle)
 { return handle->ErrorCode; }
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *handle,
@@ -39,12 +65,19 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *handle,
 
 static void clear_mock(uint32_t now)
 {
+    irq_restore_hook = NULL;
     memset(&can, 0, sizeof(can));
     tx_count = 0U;
     tick_ms = now;
     fifo_free = 3U;
     send_status = HAL_OK;
     bus_off = false;
+    bus_passive = false;
+    bus_warning = false;
+    bus_tx_errors = 0U;
+    bus_rx_errors = 0U;
+    bus_status_result = HAL_OK;
+    bus_counters_result = HAL_OK;
 }
 
 static unsigned int command_type(unsigned int index)
@@ -259,7 +292,7 @@ static void startup_and_fault_tests(void)
     start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
     bus_off = true;
     normal_tick(&motor, 0.0f);
-    assert(motor.fault == CG_FAULT_BUS);
+    assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
 
     clear_mock(1000U);
     start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
@@ -344,6 +377,67 @@ static void wait_for_mode_request(CyberGearMotor *motor)
         (void)cybergear_control_position_adrc(motor, 0.0f);
     }
     assert(motor->state == CG_STATE_WAIT_MODE && motor->mode_read_pending);
+}
+
+static void wait_for_run_feedback(CyberGearMotor *motor)
+{
+    wait_for_mode_request(motor);
+    mode_reply(motor, CYBERGEAR_RUN_MODE_CURRENT);
+    for (unsigned int step = 0U; step < 6U && motor->state != CG_STATE_WAIT_RUN; ++step) {
+        tick_ms += motor->config.controller.period_ms;
+        feedback(motor, 0U, 0.0f, 0.0f, 25.0f, 0U);
+        assert(cybergear_control_position_adrc(motor, 0.0f));
+    }
+    assert(motor->state == CG_STATE_WAIT_RUN);
+}
+
+void test_startup_handoff(void)
+{
+    const float velocities[] = {-0.04349f, 0.0371f};
+    for (unsigned int sample = 0U; sample < sizeof(velocities) / sizeof(velocities[0]); ++sample) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        wait_for_run_feedback(&motor);
+        tick_ms += motor.config.controller.period_ms;
+        feedback(&motor, 2U, 0.01545f, velocities[sample], 25.0f, 0U);
+        const unsigned int before = tx_count;
+        assert(cybergear_control_position_adrc(&motor, 0.0f));
+        assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+        assert(motor.controller.position_rad == motor.feedback.position_rad);
+        assert(motor.controller.velocity_rad_s == motor.feedback.velocity_rad_s);
+        assert(motor.trajectory.point.q_rad == motor.feedback.position_rad);
+        assert(motor.controller.applied_current_valid && motor.controller.last_queued_current_a == 0.0f);
+        assert(tx_count == before);
+        tick_ms += motor.config.controller.period_ms;
+        feedback(&motor, 2U, 0.01545f, velocities[sample], 25.0f, 0U);
+        assert(cybergear_control_position_adrc(&motor, motor.requested_target_rad));
+        assert(tx_count == before + 1U);
+        assert(command_type(before) == CYBERGEAR_COMM_WRITE_PARAMETER);
+        assert(fabsf(motor.controller.last_queued_current_a) <=
+            fmaxf(motor.config.controller.current_rise_a_s, motor.config.controller.current_fall_a_s) *
+            (float)motor.config.controller.period_ms * 0.001f + 1e-6f);
+    }
+    for (unsigned int scenario = 0U; scenario < 3U; ++scenario) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        wait_for_run_feedback(&motor);
+        tick_ms += motor.config.controller.period_ms;
+        if (scenario != 0U) feedback(&motor, scenario == 1U ? 0U : 2U, 0.0f, 0.0f, 25.0f, 0U);
+        if (scenario == 2U) motor.feedback.last_received_ms = tick_ms - motor.config.controller.feedback_timeout_ms - 1U;
+        assert(cybergear_control_position_adrc(&motor, 0.0f));
+        assert(motor.state == CG_STATE_WAIT_RUN);
+        tick_ms = motor.startup_ms + motor.config.startup_timeout_ms + 1U;
+        assert(!cybergear_control_position_adrc(&motor, 0.0f));
+        assert(motor.fault == CG_FAULT_START_TIMEOUT);
+    }
+    CyberGearMotor motor;
+    clear_mock(1000U);
+    wait_for_run_feedback(&motor);
+    tick_ms += motor.config.controller.period_ms;
+    feedback(&motor, 2U, 0.0f, motor.config.speed_trip_rad_s + 0.1f, 25.0f, 0U);
+    assert(!cybergear_control_position_adrc(&motor, 0.0f));
+    assert(motor.fault == CG_FAULT_SPEED);
+    puts("Startup: fresh Run feedback hands measured motion to ADRC; response and speed checks remain.");
 }
 
 static void rejected_startup_tests(void)
@@ -504,10 +598,11 @@ static void configured_motion_protection_test(void)
     }
 }
 
-static void start_saturation_fixture(CyberGearMotor *motor, bool amplitude)
+static void start_saturation_fixture(CyberGearMotor *motor, bool amplitude, bool recovery)
 {
     configure(motor);
     CyberGearConfig config = motor->config;
+    config.recover_on_saturation = recovery;
     config.controller.bandwidth_rad_s = amplitude ? 100.0f : 10.0f;
     config.controller.damping_ratio = 0.01f;
     config.controller.observer_rad_s = 100.0f;
@@ -524,7 +619,7 @@ static void saturation_tick(CyberGearMotor *motor, float position_rad)
 {
     tick_ms += motor->config.controller.period_ms;
     feedback(motor, 2U, position_rad, 0.0f, 25.0f, 0U);
-    (void)cybergear_control_position_adrc(motor, 0.0f);
+    (void)cybergear_control_position_adrc(motor, motor->requested_target_rad);
     cybergear_service(motor);
     assert(motor->latest_log.amp_limited == motor->output.amplitude_limited);
     assert(motor->latest_log.slew_limited == motor->output.slew_limited);
@@ -537,7 +632,7 @@ static void sustained_saturation_protection_test(void)
             CyberGearMotor motor;
             clear_mock(1000U);
             const bool amplitude = variant == 0U;
-            start_saturation_fixture(&motor, amplitude);
+            start_saturation_fixture(&motor, amplitude, false);
             const uint32_t saturation_start_ms = tick_ms + motor.config.controller.period_ms;
             for (uint32_t step = 0U; step <= motor.config.saturation_timeout_ms /
                  motor.config.controller.period_ms; ++step) {
@@ -564,7 +659,7 @@ static void transient_saturation_reset_test(void)
 {
     CyberGearMotor motor;
     clear_mock(1000U);
-    start_saturation_fixture(&motor, false);
+    start_saturation_fixture(&motor, false, false);
     for (unsigned int step = 0U; step < 10U; ++step) {
         saturation_tick(&motor, 0.02f);
         assert(motor.saturation_active && motor.output.slew_limited);
@@ -588,6 +683,392 @@ static void transient_saturation_reset_test(void)
     }
 }
 
+static void sustained_saturation_recovery_test(void)
+{
+    for (unsigned int variant = 0U; variant < 2U; ++variant) {
+        for (int direction = -1; direction <= 1; direction += 2) {
+            CyberGearMotor motor;
+            clear_mock(direction < 0 ? UINT32_MAX - 1500U : 1000U);
+            start_saturation_fixture(&motor, variant == 0U, true);
+            motor.dynamics.b0 = 12.0f;
+            motor.controller.b0 = 12.0f;
+            motor.prepared = motor.trajectory;
+            assert(cg_trajectory_plan(&motor.prepared, 0.01f, &motor.effective_limits));
+            motor.prepared_start_ms = tick_ms + 5000U;
+            motor.prepared_ready = true;
+            const CgTrajectory prepared = motor.prepared;
+            const uint32_t prepared_start = motor.prepared_start_ms;
+            const uint32_t trajectory_start = motor.trajectory_start_ms;
+            const uint32_t controller_start = motor.controller.start_timestamp_ms;
+            const uint32_t generation = motor.plan_generation;
+            const float target = motor.requested_target_rad;
+            const CyberGearConfig config = motor.config;
+            const unsigned int first_command = tx_count;
+            const uint32_t max_steps = 4U * config.saturation_timeout_ms / config.controller.period_ms;
+            for (uint32_t step = 0U; step < max_steps && motor.recovery_count < 2U; ++step) {
+                const float previous_current = motor.controller.last_queued_current_a;
+                const uint32_t previous_count = motor.recovery_count;
+                const int feedback_direction = variant != 0U && step % 2U != 0U ? -direction : direction;
+                saturation_tick(&motor, 0.02f * (float)feedback_direction);
+                assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+                assert(motor.managed && !motor.first_cyclic);
+                assert(motor.controller.start_timestamp_ms == controller_start);
+                if (motor.recovery_count == 0U) {
+                    assert(motor.trajectory_start_ms == trajectory_start);
+                    assert(motor.plan_generation == generation);
+                    assert(motor.prepared_ready && motor.prepared_start_ms == prepared_start);
+                    assert(memcmp(&motor.prepared, &prepared, sizeof(prepared)) == 0);
+                } else {
+                    assert(motor.plan_generation >= generation + motor.recovery_count);
+                    if (motor.recovery_zero_active) assert(!motor.prepared_ready);
+                }
+                assert(motor.requested_target_rad == target);
+                assert(memcmp(&motor.config, &config, sizeof(config)) == 0);
+                assert(motor.controller.applied_current_valid);
+                assert(motor.controller.last_queued_timestamp_ms == tick_ms);
+                assert(motor.controller.rx_sequence == motor.feedback.rx_sequence);
+                const float change = motor.controller.last_queued_current_a - previous_current;
+                const float period_s = (float)config.controller.period_ms * 0.001f;
+                assert(fabsf(motor.controller.last_queued_current_a) <= config.controller.current_limit_a);
+                if (motor.recovery_count == previous_count) {
+                    assert(change <= config.controller.current_rise_a_s * period_s + 1e-5f);
+                    assert(-change <= config.controller.current_fall_a_s * period_s + 1e-5f);
+                }
+                if (motor.recovery_zero_active) assert(motor.controller.last_queued_current_a == 0.0f);
+                if (motor.recovery_count != previous_count) {
+                    assert(motor.controller.b0 == config.controller.b0_initial);
+                    assert(motor.dynamics.b0 == config.dynamics.fixed_b0);
+                    assert(motor.controller.disturbance_rad_s2 == 0.0f);
+                    assert(motor.controller.compensation_elapsed_ms == 0U);
+                    assert(!motor.saturation_active);
+                }
+            }
+            assert(motor.recovery_count == 2U);
+            for (unsigned int command = first_command; command < tx_count; ++command) {
+                assert(command_type(command) == CYBERGEAR_COMM_WRITE_PARAMETER);
+                const uint16_t parameter = (uint16_t)(tx[command].data[0] |
+                    ((uint16_t)tx[command].data[1] << 8));
+                assert(parameter == CYBERGEAR_PARAM_IQ_REF);
+            }
+        }
+    }
+}
+
+static void saturation_recovery_preserves_protection_test(void)
+{
+    for (unsigned int scenario = 0U; scenario < 2U; ++scenario) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        start_saturation_fixture(&motor, true, true);
+        motor.config.tracking_error_rad = 0.001f;
+        motor.config.recover_on_tracking = scenario != 0U;
+        motor.tracking_active = true;
+        motor.tracking_since_ms = scenario == 0U ? tick_ms - motor.config.tracking_timeout_ms : tick_ms;
+        motor.saturation_active = true;
+        motor.saturation_since_ms = tick_ms - motor.config.saturation_timeout_ms;
+        motor.stall_active = scenario != 0U;
+        motor.stall_since_ms = tick_ms - motor.config.stall_timeout_ms;
+        motor.stall_start_rad = 0.02f;
+        assert(cybergear_controller_commit_queued(&motor.controller, motor.config.controller.current_limit_a, tick_ms));
+        const unsigned int before = tx_count;
+        saturation_tick(&motor, 0.02f);
+        assert(motor.state == CG_STATE_STOPPING);
+        assert(motor.fault == (scenario == 0U ? CG_FAULT_TRACKING : CG_FAULT_STALL));
+        assert(motor.recovery_count == 0U);
+        assert_only_stop_after(before);
+    }
+}
+
+static void recovery_zero_current_test(void)
+{
+    for (unsigned int trigger = 0U; trigger < 2U; ++trigger) {
+        for (int direction = -1; direction <= 1; direction += 2) {
+            CyberGearMotor motor;
+            clear_mock(1000U);
+            configure(&motor);
+            CyberGearConfig config = motor.config;
+            config.controller.period_ms = direction < 0 ? 5U : 10U;
+            config.controller.current_rise_a_s = 2.0f;
+            config.controller.current_fall_a_s = 3.0f;
+            config.dynamics.current_slew_a_s = 2.0f;
+            config.dynamics.reserve_slew_a_s = 1.0f;
+            config.tracking_error_rad = trigger == 0U ? 0.001f : 1.0f;
+            config.recovery_zero_ms = 203U;
+            assert(cybergear_configure(&motor, &config));
+            start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+            tick_ms = UINT32_MAX - 100U;
+            motor.last_control_ms = tick_ms;
+            motor.controller.last_control_timestamp_ms = tick_ms;
+            motor.controller.observer_timestamp_ms = tick_ms;
+            motor.controller.last_queued_timestamp_ms = tick_ms;
+            feedback(&motor, 2U, 0.0f, 0.0f, 25.0f, 0U);
+            motor.controller.rx_timestamp_ms = tick_ms;
+            assert(cybergear_controller_commit_queued(&motor.controller, (float)direction, tick_ms));
+            motor.controller.b0 = motor.dynamics.b0 = 12.0f;
+            motor.controller.disturbance_rad_s2 = 1.0f;
+            motor.controller.disturbance_current_a = 0.3f;
+            motor.tracking_active = trigger == 0U;
+            motor.tracking_since_ms = tick_ms - config.tracking_timeout_ms;
+            motor.saturation_active = trigger == 1U;
+            motor.saturation_since_ms = tick_ms - config.saturation_timeout_ms;
+            const uint32_t original_start = motor.controller.start_timestamp_ms;
+            const uint32_t original_trajectory_start = motor.trajectory_start_ms;
+            const float target = motor.requested_target_rad;
+            const unsigned int first_command = tx_count;
+            saturation_tick(&motor, 0.02f * (float)direction);
+            const uint32_t recovery_start = tick_ms;
+            assert(motor.recovery_zero_active && motor.recovery_count == 1U);
+            while (true) {
+                assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+                assert(motor.controller.last_queued_current_a == 0.0f);
+                assert(motor.controller.applied_current_estimate_a == 0.0f && motor.controller.applied_current_valid);
+                assert(motor.output.current_a == 0.0f && motor.controller.disturbance_current_a == 0.0f);
+                assert(motor.controller.disturbance_rad_s2 == 0.0f);
+                assert(motor.controller.b0 == config.controller.b0_initial && motor.dynamics.b0 == config.dynamics.fixed_b0);
+                assert(motor.controller.compensation_elapsed_ms == 0U);
+                assert(motor.recovery_count == 1U && motor.recovery_started_ms == recovery_start);
+                assert(!motor.tracking_active && !motor.saturation_active && !motor.stall_active);
+                assert(motor.controller.start_timestamp_ms == original_start);
+                assert(motor.trajectory_start_ms == original_trajectory_start);
+                assert(motor.requested_target_rad == target);
+                assert(motor.controller.rx_sequence == motor.feedback.rx_sequence);
+                float sent_current;
+                memcpy(&sent_current, tx[tx_count - 1U].data + 4, sizeof(sent_current));
+                assert(sent_current == 0.0f);
+                saturation_tick(&motor, 0.02f * (float)direction);
+                if (tick_ms - recovery_start >= config.recovery_zero_ms) break;
+                assert(motor.recovery_zero_active);
+            }
+            assert(!motor.recovery_zero_active && motor.recovery_count == 1U);
+            assert(motor.trajectory_start_ms == tick_ms);
+            assert(motor.trajectory.point.q_rad == motor.feedback.position_rad);
+            assert(motor.trajectory.point.v_rad_s == 0.0f && motor.trajectory.point.a_rad_s2 == 0.0f);
+            assert(motor.requested_target_rad == target);
+            assert(tick_ms - recovery_start < config.recovery_zero_ms + config.controller.period_ms);
+            assert(fabsf(motor.controller.last_queued_current_a) <=
+                config.controller.current_fall_a_s * (float)config.controller.period_ms * 0.001f + 1e-6f);
+            for (unsigned int command = first_command; command < tx_count; ++command) {
+                assert(command_type(command) == CYBERGEAR_COMM_WRITE_PARAMETER);
+                assert(tx[command].data[0] == (CYBERGEAR_PARAM_IQ_REF & 0xffU));
+                assert(tx[command].data[1] == (CYBERGEAR_PARAM_IQ_REF >> 8));
+            }
+        }
+    }
+}
+
+static void recovery_replan_test(void)
+{
+    for (unsigned int scenario = 0U; scenario < 3U; ++scenario) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        configure(&motor);
+        CyberGearConfig config = motor.config;
+        config.controller.period_ms = scenario == 0U ? 5U : 10U;
+        config.recovery_zero_ms = 703U;
+        assert(cybergear_configure(&motor, &config));
+        start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+        CgTrajectoryPoint old_reference = {.q_rad = 0.6f};
+        assert(cg_trajectory_reset(&motor.trajectory, &old_reference, &motor.effective_limits));
+        motor.requested_target_rad = 0.8f;
+        motor.prepared = motor.trajectory;
+        assert(cg_trajectory_plan(&motor.prepared, motor.requested_target_rad, &motor.effective_limits));
+        motor.prepared_ready = true;
+        motor.prepared_start_ms = tick_ms + 2U * config.controller.period_ms;
+        motor.tracking_active = true;
+        motor.tracking_since_ms = tick_ms - config.tracking_timeout_ms;
+        const uint32_t generation = motor.plan_generation;
+        saturation_tick(&motor, 0.02f);
+        assert(motor.recovery_zero_active && !motor.prepared_ready);
+        assert(motor.plan_generation == generation + 1U);
+        const uint32_t recovery_start = tick_ms;
+        motor.requested_target_rad = scenario == 0U ? 0.4f : 0.8f;
+        while (tick_ms + config.controller.period_ms - recovery_start < config.recovery_zero_ms) {
+            saturation_tick(&motor, 0.04f);
+            assert(motor.state == CG_STATE_RUNNING && motor.recovery_zero_active);
+            assert(!motor.prepared_ready && motor.plan_generation == generation + 1U);
+            assert(motor.controller.last_queued_current_a == 0.0f);
+        }
+        tick_ms += config.controller.period_ms;
+        feedback(&motor, 2U, 0.05f, 0.0f, 25.0f, 0U);
+        if (scenario == 2U) motor.requested_target_rad = motor.feedback.position_rad;
+        const CyberGearController before = motor.controller;
+        CyberGearController expected = before;
+        CyberGearControllerReference reference = {motor.feedback.position_rad, 0.0f, 0.0f};
+        CyberGearControllerMeasurement measurement = {motor.feedback.position_rad,
+            motor.feedback.rx_sequence, motor.feedback.last_received_ms, true};
+        CyberGearControllerOutput output;
+        assert(cybergear_controller_step(&expected, &reference, &measurement, tick_ms,
+            config.controller.b0_initial, &output));
+        assert(cybergear_control_position_adrc(&motor, motor.requested_target_rad));
+        assert(!motor.recovery_zero_active && !motor.prepared_ready);
+        assert(motor.plan_generation == generation + 2U);
+        assert(motor.trajectory.point.q_rad == motor.feedback.position_rad);
+        assert(motor.trajectory_start_ms == tick_ms && motor.requested_since_ms == tick_ms);
+        assert(!motor.tracking_active);
+        assert(motor.controller.position_rad == expected.position_rad);
+        assert(motor.controller.velocity_rad_s == expected.velocity_rad_s);
+        assert(motor.output.current_a == output.current_a);
+        cybergear_service(&motor);
+        if (scenario == 2U) {
+            assert(!motor.prepared_ready && !motor.trajectory.active);
+        } else {
+            assert(motor.prepared_ready);
+            assert(motor.prepared.initial.q_rad == motor.feedback.position_rad);
+            assert(motor.prepared.initial.v_rad_s == 0.0f && motor.prepared.initial.a_rad_s2 == 0.0f);
+            assert(motor.prepared.target_rad == motor.requested_target_rad);
+            assert(motor.prepared_start_ms == tick_ms + config.planner_lead_ms);
+            assert(cg_trajectory_validate(&motor.prepared, &motor.effective_limits));
+        }
+    }
+}
+
+static void interrupt_plan_with_recovery(void)
+{
+    CyberGearMotor *motor = planning_race_motor;
+    tick_ms += motor->config.controller.period_ms;
+    feedback(motor, 2U, 0.02f, 0.0f, 25.0f, 0U);
+    assert(cybergear_control_position_adrc(motor, motor->requested_target_rad));
+    assert(motor->recovery_zero_active);
+}
+
+static void recovery_replan_race_test(void)
+{
+    CyberGearMotor motor;
+    clear_mock(1000U);
+    start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+    const CgTrajectoryPoint old_reference = {.q_rad = 0.6f};
+    assert(cg_trajectory_reset(&motor.trajectory, &old_reference, &motor.effective_limits));
+    motor.requested_target_rad = 0.8f;
+    motor.tracking_active = true;
+    motor.tracking_since_ms = tick_ms - motor.config.tracking_timeout_ms;
+    const uint32_t generation = motor.plan_generation;
+    planning_race_motor = &motor;
+    irq_restore_hook = interrupt_plan_with_recovery;
+    cybergear_service(&motor);
+    assert(irq_restore_hook == NULL);
+    assert(motor.recovery_zero_active && motor.plan_generation == generation + 1U);
+    assert(!motor.prepared_ready && !motor.planning_fault);
+    planning_race_motor = NULL;
+}
+
+static void recovery_replan_release_test(void)
+{
+    for (int direction = -1; direction <= 1; direction += 2) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        configure(&motor);
+        CyberGearConfig config = motor.config;
+        config.controller.period_ms = direction < 0 ? 5U : 10U;
+        assert(cybergear_configure(&motor, &config));
+        start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+        const uint32_t started = tick_ms;
+        const float target = (float)direction * 0.8f;
+        const float period_s = (float)config.controller.period_ms * 0.001f;
+        float position = motor.feedback.position_rad;
+        float velocity = 0.0f;
+        bool released = false;
+        bool reached = false;
+        for (unsigned int step = 0U; step < 15000U / config.controller.period_ms; ++step) {
+            if (motor.recovery_zero_active &&
+                tick_ms - motor.recovery_started_ms >= config.recovery_zero_ms / 2U) released = true;
+            if (released) {
+                const float acceleration = config.controller.b0_initial * motor.controller.last_queued_current_a - 0.2f * velocity;
+                position += period_s * velocity + 0.5f * period_s * period_s * acceleration;
+                velocity += period_s * acceleration;
+            }
+            tick_ms += config.controller.period_ms;
+            feedback(&motor, 2U, position, velocity, 25.0f, 0U);
+            tx_count = 0U;
+            assert(cybergear_control_position_adrc(&motor, target));
+            cybergear_service(&motor);
+            assert(motor.recovery_count <= 1U);
+            assert(motor.controller.start_timestamp_ms == started);
+            if (released && !motor.recovery_zero_active && !motor.trajectory.active && !motor.prepared_ready &&
+                fabsf(target - position) < 0.005f && fabsf(velocity) < 0.03f) {
+                reached = true;
+                break;
+            }
+        }
+        assert(released && reached && motor.recovery_count == 1U);
+        printf("Recovery release: %u Hz target=%.2f reached after %lu ms without another recovery\n",
+            1000U / config.controller.period_ms, (double)target, (unsigned long)(tick_ms - started));
+    }
+}
+
+static void recovery_replan_failure_test(void)
+{
+    for (unsigned int scenario = 0U; scenario < 3U; ++scenario) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+        const CgTrajectoryPoint old_reference = {.q_rad = 0.6f};
+        assert(cg_trajectory_reset(&motor.trajectory, &old_reference, &motor.effective_limits));
+        motor.requested_target_rad = 0.8f;
+        motor.tracking_active = true;
+        motor.tracking_since_ms = tick_ms - motor.config.tracking_timeout_ms;
+        saturation_tick(&motor, 0.0f);
+        assert(motor.recovery_zero_active);
+        if (scenario == 0U) {
+            motor.effective_limits.position_max_rad = 0.01f;
+            motor.effective_limits.position_min_rad = -0.01f;
+        }
+        if (scenario == 1U) motor.effective_limits.duration_max_s = motor.effective_limits.duration_min_s;
+        while (motor.recovery_zero_active) {
+            tick_ms += motor.config.controller.period_ms;
+            feedback(&motor, 2U, 0.02f, 0.0f, 25.0f, 0U);
+            (void)cybergear_control_position_adrc(&motor, motor.requested_target_rad);
+        }
+        if (scenario == 0U) {
+            assert(motor.fault == CG_FAULT_POSITION);
+        } else {
+            assert(motor.fault == CG_FAULT_NONE);
+            if (scenario == 1U) {
+                cybergear_service(&motor);
+                assert(motor.planning_fault);
+            }
+            for (unsigned int step = 0U; step <= motor.config.planner_timeout_ms / motor.config.controller.period_ms + 1U &&
+                motor.state == CG_STATE_RUNNING; ++step) {
+                tick_ms += motor.config.controller.period_ms;
+                feedback(&motor, 2U, 0.02f, 0.0f, 25.0f, 0U);
+                (void)cybergear_control_position_adrc(&motor, motor.requested_target_rad);
+            }
+            assert(motor.fault == CG_FAULT_PLANNER);
+        }
+        assert(motor.state == CG_STATE_STOPPING);
+    }
+}
+
+static void recovery_zero_failure_test(void)
+{
+    for (unsigned int scenario = 0U; scenario < 3U; ++scenario) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        start_saturation_fixture(&motor, true, true);
+        motor.config.tracking_error_rad = 0.001f;
+        motor.tracking_active = true;
+        motor.tracking_since_ms = tick_ms - motor.config.tracking_timeout_ms;
+        assert(cybergear_controller_commit_queued(&motor.controller, 1.0f, tick_ms));
+        if (scenario == 0U) send_status = HAL_ERROR;
+        saturation_tick(&motor, 0.02f);
+        if (scenario == 0U) {
+            assert(motor.fault == CG_FAULT_TX);
+            assert(motor.controller.last_queued_current_a == 1.0f && !motor.controller.applied_current_valid);
+        } else {
+            assert(motor.recovery_zero_active && motor.controller.last_queued_current_a == 0.0f);
+            if (scenario == 1U) {
+                tick_ms += motor.config.controller.feedback_timeout_ms + 1U;
+                assert(!cybergear_control_position_adrc(&motor, motor.requested_target_rad));
+                assert(motor.fault == CG_FAULT_FEEDBACK);
+            } else {
+                assert(cybergear_stop(&motor));
+                assert(motor.fault == CG_FAULT_REQUESTED_STOP);
+            }
+        }
+        assert(motor.state == CG_STATE_STOPPING);
+        assert(!motor.recovery_zero_active);
+    }
+}
+
 static void standalone_feedback_delay_test(void)
 {
     for (unsigned int original_observer = 0U; original_observer < 2U; ++original_observer) {
@@ -598,6 +1079,7 @@ static void standalone_feedback_delay_test(void)
         if (original_observer != 0U) {
             CyberGearConfig config = motor.config;
             config.controller.observer_rad_s = 10.0f;
+            config.recover_on_saturation = false;
             assert(cybergear_configure(&motor, &config));
         } else assert(motor.config.controller.observer_rad_s <= 6.0f);
         start_configured(&motor, CYBERGEAR_RUN_MODE_CURRENT);
@@ -862,6 +1344,66 @@ static void configuration_boundaries_test(void)
 
 }
 
+void test_bus_monitoring(void)
+{
+    for (unsigned int scenario = 0U; scenario < 6U; ++scenario) {
+        CyberGearMotor motor;
+        clear_mock(1000U);
+        bus_tx_errors = 128U;
+        bus_rx_errors = 96U;
+        bus_warning = scenario == 1U;
+        bus_passive = scenario == 2U;
+        bus_off = scenario == 3U;
+        bus_status_result = scenario == 4U ? HAL_ERROR : HAL_OK;
+        bus_counters_result = scenario == 5U ? HAL_ERROR : HAL_OK;
+        start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+        const unsigned int before = tx_count;
+        normal_tick(&motor, 0.0f);
+        assert(motor.state == CG_STATE_RUNNING && motor.fault == CG_FAULT_NONE);
+        assert(tx_count == before + 1U);
+        assert(command_type(before) == CYBERGEAR_COMM_WRITE_PARAMETER);
+        if (bus_counters_result == HAL_OK) assert(motor.tec == 128U && motor.rec == 96U);
+    }
+    CyberGearMotor motor;
+    clear_mock(1000U);
+    start(&motor, CYBERGEAR_RUN_MODE_CURRENT);
+    bus_tx_errors = 8U;
+    tick_ms += motor.config.controller.feedback_timeout_ms + 1U;
+    assert(!cybergear_control_position_adrc(&motor, 0.0f));
+    assert(motor.fault == CG_FAULT_FEEDBACK);
+    puts("CAN bus: status monitoring does not stop startup/control; stale feedback still stops.");
+}
+
+void test_saturation(void)
+{
+    CyberGearConfig config;
+    cybergear_config_defaults(&config);
+    assert(config.recover_on_saturation == (CYBERGEAR_SATURATION_RECOVERY_ENABLED != 0));
+    assert(config.recover_on_tracking == (CYBERGEAR_TRACKING_RECOVERY_ENABLED != 0));
+    assert(config.recovery_zero_ms == CYBERGEAR_RECOVERY_ZERO_MS);
+    config.recovery_zero_ms = 0U;
+    assert(!cybergear_config_valid(&config));
+    sustained_saturation_protection_test();
+    transient_saturation_reset_test();
+    sustained_saturation_recovery_test();
+    saturation_recovery_preserves_protection_test();
+    recovery_zero_current_test();
+    recovery_replan_test();
+    recovery_replan_race_test();
+    recovery_replan_release_test();
+    recovery_replan_failure_test();
+    recovery_zero_failure_test();
+    CyberGearMotor motor;
+    clear_mock(1000U);
+    start(&motor, CYBERGEAR_RUN_MODE_OPERATION);
+    motor.config.tracking_error_rad = 0.001f;
+    motor.tracking_active = true;
+    motor.tracking_since_ms = tick_ms - motor.config.tracking_timeout_ms;
+    saturation_tick(&motor, 0.02f);
+    assert(motor.fault == CG_FAULT_TRACKING && motor.recovery_count == 0U);
+    puts("Recovery: tracking/saturation, timed zero current, restart slew limits, and protection passed.");
+}
+
 void test_driver(void)
 {
     reinitialize_stop_confirmation_test();
@@ -869,14 +1411,15 @@ void test_driver(void)
     configuration_boundaries_test();
     protocol_tests();
     startup_and_fault_tests();
+    test_bus_monitoring();
     long_hold_wrap_test();
     timer_handoff_test();
     rejected_startup_tests();
+    test_startup_handoff();
     streaming_and_protection_tests();
     unmanaged_fault_gate_test();
     configured_motion_protection_test();
-    sustained_saturation_protection_test();
-    transient_saturation_reset_test();
+    test_saturation();
     standalone_feedback_delay_test();
     standalone_loaded_motion_test();
     puts("Driver: protocol, ownership, startup, faults, TX failure, and wrap passed.");

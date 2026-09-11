@@ -71,7 +71,7 @@
 #define CYBERGEAR_TRAJECTORY_BRAKE_RAD_S2  2.0f
 #define CYBERGEAR_TRAJECTORY_JERK_RAD_S3   8.0f
 /* UART: rise、fall [A/s]。符号付き指令電流の数値が増加/減少する速さの上限。
- * 電流絶対値の増減ではない。総電流が3 A未満でも連続して掛かると飽和停止し得る。
+ * 電流絶対値の増減ではない。総電流が上限未満でも連続して掛かると飽和復帰の対象になる。
  * 予約変化率reserve_slewより大きい値が必要。大きくすると電流の急変を許す。 */
 #define CYBERGEAR_CURRENT_RISE_A_S         10.0f
 #define CYBERGEAR_CURRENT_FALL_A_S         10.0f
@@ -245,16 +245,30 @@
 #define CYBERGEAR_TRAJECTORY_SEARCH_ITERATIONS 32U
 
 /* 6. 制御中の保護・管理制御の起動停止
+ * CANバス状態・エラーカウンターによるfault=3の自動停止判定は行わない。
+ * 受信鮮度・送信キュー投入失敗の停止判定は有効。
  * 位置ジャンプの追加許容量[rad]。前回位置から速度上限×受信間隔を超えた
  * 不連続量に対する余裕。実際の実装条件と合わせて変更する。 */
 #define CYBERGEAR_POSITION_JUMP_RAD        0.02f
 /* 参照軌道との位置誤差[rad]が閾値を超え続ける許容時間[ms]。
  * 試験の最終目標との誤差や1区間タイムアウトとは別の保護。 */
 #define CYBERGEAR_TRACKING_ERROR_RAD       0.15f
-#define CYBERGEAR_TRACKING_TIMEOUT_MS      500U
-/* 総電流の振幅制限または変化率制限が連続する許容時間[ms]。fault=15の条件。
- * 外乱補償だけのクリップとは別。原因を調べず延長して保護を回避しない。 */
+#define CYBERGEAR_TRACKING_TIMEOUT_MS      200U
+#define CYBERGEAR_TRACKING_RECOVERY_ENABLED 1
+/* 総電流の振幅制限または変化率制限が連続する許容時間[ms]。
+ * 外乱補償だけのクリップとは別。RECOVERY_ENABLED=1ではb0と外乱推定値を
+ * 運転開始時の初期値へ戻し、補償ランプを再開して運転を継続する。
+ * 追従異常もTRACKING_RECOVERY_ENABLED=1で同じ復帰処理を行う。
+ * 電流モードでは復帰検出周期から電流を即座に0 Aにし、RECOVERY_ZERO_MS保持する。
+ * ゼロへの切替だけは電流変化率制限を適用しない。再開時は0 Aから制限を適用する。
+ * 位置・速度推定と原点・最終目標を保持し、原点探索・再初期化は行わない。
+ * 古い準備済み軌道を破棄し、ゼロ保持終了時の実測位置から最終目標へ再計画する。
+ * 再計画待ちはその位置を保持する参照（速度・加速度0）を使用する。
+ * 各有効設定が0なら従来のfault=13/15で停止。内蔵PD比較モードも停止を維持する。
+ * 停滞・温度・通信などの停止判定は別途有効。 */
 #define CYBERGEAR_SATURATION_TIMEOUT_MS    1000U
+#define CYBERGEAR_SATURATION_RECOVERY_ENABLED 1
+#define CYBERGEAR_RECOVERY_ZERO_MS         200U
 /* 停滞検出: 総電流上限に対する指令電流の割合、進捗角度[rad]、監視時間[ms]。
  * 参照軌道との誤差がTRACKING_ERROR_RADを超え、大電流が続き進捗不足なら停止。
  * 試験でも実効電流上限の同じ割合を上限に使う。 */
@@ -262,7 +276,8 @@
 #define CYBERGEAR_STALL_PROGRESS_RAD       0.003f
 #define CYBERGEAR_STALL_TIMEOUT_MS         1000U
 /* 管理制御の停止確認などに使う静止速度[rad/s]と継続時間[ms]。
- * 試験の到達判定とは別なので、2節を変えてもこの値は変わらない。 */
+ * 試験の到達判定とは別なので、2節を変えてもこの値は変わらない。
+ * ENABLE後は静止継続を待たず、新しいRun応答の実測位置・速度からADRCへ引き継ぐ。 */
 #define CYBERGEAR_STATIONARY_SPEED_RAD_S   0.03f
 #define CYBERGEAR_STATIONARY_DWELL_MS       100U
 /* 管理制御の起動待ち、コマンド再試行間隔、停止応答待ち[ms]、停止送信の最大回数。

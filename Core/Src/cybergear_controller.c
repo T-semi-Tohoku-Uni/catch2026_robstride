@@ -127,6 +127,14 @@ void cybergear_controller_invalidate_input(CyberGearController *controller)
     if (controller != NULL) controller->applied_current_valid = false;
 }
 
+void cybergear_controller_reset_adaptation(CyberGearController *controller)
+{
+    if (controller == NULL || !controller->initialized) return;
+    controller->b0 = controller->config.b0_initial;
+    controller->disturbance_rad_s2 = 0.0f;
+    controller->compensation_elapsed_ms = 0U;
+}
+
 static float disturbance_leak(const CyberGearController *controller, float qd)
 {
     const CyberGearControllerConfig *c = &controller->config;

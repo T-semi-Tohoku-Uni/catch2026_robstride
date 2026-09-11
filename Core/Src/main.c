@@ -829,7 +829,8 @@ static void cybergear_test_console_init(void)
 
 static bool cybergear_test_trajectory_done(void)
 {
-  return !cybergear_base.trajectory.active && !cybergear_base.prepared_ready &&
+  return !cybergear_base.recovery_zero_active &&
+      !cybergear_base.trajectory.active && !cybergear_base.prepared_ready &&
       fabsf(cybergear_base.trajectory.target_rad - target_angle[0]) <=
       cybergear_base.effective_limits.target_tolerance_rad &&
       fabsf(cybergear_base.requested_target_rad - target_angle[0]) <=
@@ -859,6 +860,8 @@ static void cybergear_test_status(bool force)
   const float tracking_error_rad = cybergear_base.trajectory.point.q_rad - feedback.position_rad;
   const uint32_t saturation_ms = cybergear_base.saturation_active ?
       (uint32_t)(cybergear_base.last_control_ms - cybergear_base.saturation_since_ms) : 0U;
+  const uint32_t recovery_count = cybergear_base.recovery_count;
+  const bool recovery_zero_active = cybergear_base.recovery_zero_active;
   const bool trajectory_done = cybergear_test_trajectory_done();
   const uint32_t sample_ms = HAL_GetTick();
   const uint32_t settled_ms = cybergear_test_motion.settling ?
@@ -882,10 +885,10 @@ static void cybergear_test_status(bool force)
          (double)tracking_current_a, (double)disturbance_current_a,
          (double)cybergear_base.config.controller.disturbance_limit_a,
          (unsigned int)disturbance_limited);
-  printf("CG TEST ireq=%.3f amp=%u slew=%u sat_ms=%lu track=%.4f\r\n",
+  printf("CG TEST ireq=%.3f amp=%u slew=%u sat_ms=%lu track=%.4f recover=%lu zero=%u\r\n",
          (double)requested_current_a, (unsigned int)amplitude_limited,
          (unsigned int)slew_limited, (unsigned long)saturation_ms,
-         (double)tracking_error_rad);
+         (double)tracking_error_rad, (unsigned long)recovery_count, (unsigned int)recovery_zero_active);
 }
 
 static bool cybergear_test_can_ready(void)

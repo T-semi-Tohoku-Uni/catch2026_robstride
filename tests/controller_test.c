@@ -221,6 +221,46 @@ static void test_synthetic_plants(void)
     }
 }
 
+static void test_adaptation_reset_preserves_motion(void)
+{
+    for (unsigned int rate = 0U; rate < 2U; ++rate) {
+        CyberGearControllerConfig config = isolated_config();
+        config.period_ms = rate == 0U ? 10U : 5U;
+        config.b0_max = 20.0f;
+        config.compensation_gain = 1.0f;
+        config.current_rise_a_s = 3.0f;
+        config.current_fall_a_s = 7.0f;
+        CyberGearController controller;
+        const uint32_t now = UINT32_MAX - config.period_ms;
+        assert(cybergear_controller_init(&controller, &config, 1.0f, 0.2f, now, 42U, now));
+        assert(cybergear_controller_commit_queued(&controller, 0.4f, now));
+        controller.b0 = 20.0f;
+        controller.disturbance_rad_s2 = -5.0f;
+        controller.disturbance_current_a = 0.3f;
+        controller.compensation_elapsed_ms = config.compensation_delay_ms + config.compensation_ramp_ms;
+        CyberGearController expected = controller;
+        expected.b0 = config.b0_initial;
+        expected.disturbance_rad_s2 = 0.0f;
+        expected.compensation_elapsed_ms = 0U;
+        cybergear_controller_reset_adaptation(&controller);
+        assert(memcmp(&controller, &expected, sizeof(controller)) == 0);
+        const CyberGearControllerReference reference = {1.0f, 0.2f, 0.0f};
+        CyberGearControllerOutput output;
+        for (uint32_t step = 1U; step <= 2U; ++step) {
+            const uint32_t timestamp = now + step * config.period_ms;
+            const float previous_current = controller.last_queued_current_a;
+            const float previous_disturbance = controller.disturbance_current_a;
+            assert(cybergear_controller_step(&controller, &reference, NULL, timestamp, config.b0_initial, &output));
+            const float period_s = (float)config.period_ms * 0.001f;
+            assert(output.gamma == 0.0f);
+            assert(fabsf(output.disturbance_current_a - previous_disturbance) <= config.disturbance_slew_a_s * period_s + 1e-6f);
+            assert(output.current_a - previous_current <= config.current_rise_a_s * period_s + 1e-6f);
+            assert(previous_current - output.current_a <= config.current_fall_a_s * period_s + 1e-6f);
+            assert(cybergear_controller_commit_queued(&controller, output.current_a, timestamp));
+        }
+    }
+}
+
 void test_controller(void)
 {
     test_reference_and_discrete_observer();
@@ -228,5 +268,6 @@ void test_controller(void)
     test_directional_limits_and_compensation();
     test_timestamps_and_rejections();
     test_leak_options();
+    test_adaptation_reset_preserves_motion();
     test_synthetic_plants();
 }
