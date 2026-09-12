@@ -41,6 +41,29 @@ typedef enum
   CG_HOME_STOP,
   CG_HOME_SET_ZERO
 } CyberGearHomingCommand;
+
+/* Capture before STOP changes the evidence; print only after requesting STOP. */
+typedef struct
+{
+  uint32_t timestamp_ms, can_rx, can_last_id, can_hal, can_txfree;
+  FDCAN_ProtocolStatusTypeDef can_status;
+  FDCAN_ErrorCountersTypeDef can_errors;
+  HAL_StatusTypeDef can_status_result, can_errors_result;
+  CyberGearFeedback cg_feedback;
+  CyberGearState cg_state, cg_before_step;
+  CyberGearFault cg_fault;
+  CyberGearLog cg_log;
+  bool cg_log_valid, cg_managed, cg_quiet, cg_mode_valid, cg_mode_pending;
+  uint32_t cg_start_age, cg_state_age, cg_quiet_age, cg_fault_sequence;
+  uint32_t cg_mode_sequence, cg_mode_request_sequence, cg_txq, cg_txfail;
+  uint8_t cg_requested_mode, cg_read_mode, cg_fault_payload[8];
+  RobstrideFeedback rs_feedback[3];
+  RobstrideStartupAxis rs_axis[3];
+  bool rs_startup_valid, rs_failed, running, initializing;
+  uint32_t rs_start_age, stop_queued, stopped, stop_baseline[3];
+  float targets[4];
+  HAL_StatusTypeDef timer_status;
+} MotorDiagnosticSnapshot;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -105,12 +128,18 @@ static uint32_t robstride_mode_since_ms[3] = {0U};
 static bool diagnostic_uart_ready = false;
 static volatile uint32_t right_rs03_position_queued = 0U;
 static volatile uint32_t right_rs03_position_failed = 0U;
+static volatile uint32_t left_rs03_position_queued = 0U;
+static volatile uint32_t left_rs03_position_failed = 0U;
 static uint32_t motor_stop_queued_mask = 0U;
 static uint32_t motor_stopped_mask = 0U;
 static uint32_t motor_stop_baseline[3] = {0U};
 static uint32_t motor_stop_cybergear_baseline = 0U;
 static uint32_t motor_stop_next_axis = 0U;
 static uint32_t motor_stop_last_probe_ms = 0U;
+static bool motor_startup_diagnostics_valid = false;
+static CyberGearState motor_cg_before_step = CG_STATE_OFF;
+static HAL_StatusTypeDef motor_start_timer_status = HAL_OK;
+static const char *motor_start_failure_reason = "startup not attempted";
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -127,6 +156,167 @@ static bool motor_stop_all(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static const char *motor_cg_state_name(CyberGearState state)
+{
+  static const char *const names[] = {
+    "OFF", "WAIT_STOP", "WRITE_MODE", "WAIT_MODE", "ZERO", "WAIT_RUN",
+    "RUNNING", "STOPPING", "FAULT", "STOPPED"
+  };
+  return (unsigned)state < sizeof(names) / sizeof(names[0]) ? names[state] : "UNKNOWN";
+}
+
+static const char *motor_cg_fault_name(CyberGearFault fault)
+{
+  static const char *const names[] = {
+    "NONE", "CONFIG", "TX", "BUS", "START_TIMEOUT", "MODE", "FEEDBACK",
+    "MOTOR", "TARGET", "TIMING", "POSITION", "SPEED", "TEMPERATURE",
+    "TRACKING", "STALL", "SATURATION", "STOP_MARGIN", "MODEL", "PLANNER",
+    "NUMERIC", "REQUESTED_STOP"
+  };
+  return (unsigned)fault < sizeof(names) / sizeof(names[0]) ? names[fault] : "UNKNOWN";
+}
+
+static const char *motor_rs_stage_name(RobstrideStartupStage stage)
+{
+  static const char *const names[] = {
+    "SEND_STOP", "WAIT_STOPPED", "SET_MODE", "SET_VELOCITY", "SET_ACCELERATION",
+    "SET_CURRENT", "SET_HOLD", "SEND_ENABLE", "WAIT_RUNNING", "READY"
+  };
+  return (unsigned)stage < sizeof(names) / sizeof(names[0]) ? names[stage] : "UNKNOWN";
+}
+
+static void motor_diagnostic_capture(MotorDiagnosticSnapshot *s)
+{
+  const uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  const uint32_t now = HAL_GetTick();
+  s->timestamp_ms = now;
+  s->running = motors_running;
+  s->initializing = motor_initializing;
+  s->can_rx = motor_can_rx_count;
+  s->can_last_id = motor_can_last_rx_id;
+  s->can_hal = HAL_FDCAN_GetError(&hfdcan3);
+  s->can_txfree = HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan3);
+  s->can_status_result = HAL_FDCAN_GetProtocolStatus(&hfdcan3, &s->can_status);
+  s->can_errors_result = HAL_FDCAN_GetErrorCounters(&hfdcan3, &s->can_errors);
+  s->cg_feedback = cybergear_base.feedback;
+  s->cg_state = cybergear_base.state;
+  s->cg_before_step = motor_cg_before_step;
+  s->cg_fault = cybergear_base.fault;
+  s->cg_log_valid = cybergear_base.fault_log_valid;
+  s->cg_log = s->cg_log_valid ? cybergear_base.fault_log : cybergear_base.latest_log;
+  s->cg_managed = cybergear_base.managed;
+  s->cg_quiet = cybergear_base.quiet_active;
+  s->cg_mode_valid = cybergear_base.mode_read_valid;
+  s->cg_mode_pending = cybergear_base.mode_read_pending;
+  s->cg_start_age = now - cybergear_base.startup_ms;
+  s->cg_state_age = now - cybergear_base.state_ms;
+  s->cg_quiet_age = s->cg_quiet ? now - cybergear_base.quiet_since_ms : 0U;
+  s->cg_fault_sequence = cybergear_base.motor_fault_sequence;
+  s->cg_mode_sequence = cybergear_base.mode_read_sequence;
+  s->cg_mode_request_sequence = cybergear_base.mode_request_sequence;
+  s->cg_requested_mode = (uint8_t)cybergear_base.requested_mode;
+  s->cg_read_mode = cybergear_base.mode_read_value;
+  s->cg_txq = cybergear_base.tx_queued;
+  s->cg_txfail = cybergear_base.tx_failed;
+  for (uint32_t i = 0U; i < 8U; ++i) s->cg_fault_payload[i] = cybergear_base.fault_payload[i];
+  s->rs_startup_valid = motor_startup_diagnostics_valid;
+  s->rs_failed = robstride_startup.failed;
+  s->rs_start_age = s->rs_startup_valid ? now - robstride_startup.started_ms : 0U;
+  s->stop_queued = motor_stop_queued_mask;
+  s->stopped = motor_stopped_mask;
+  s->timer_status = motor_start_timer_status;
+  for (uint32_t i = 0U; i < 3U; ++i)
+  {
+    s->rs_feedback[i] = robstride_handler[i].feedback;
+    s->rs_axis[i] = robstride_startup.axes[i];
+    s->stop_baseline[i] = motor_stop_baseline[i];
+  }
+  for (uint32_t i = 0U; i < 4U; ++i) s->targets[i] = target_angle[i];
+  __set_PRIMASK(mask);
+}
+
+static void motor_diagnostic_print(const char *label, const MotorDiagnosticSnapshot *s)
+{
+  /* Short lines fit the 10 ms UART timeout at 115200 baud, even with large values. */
+  printf("DIAG %s t=%lu run=%u init=%u\r\n", label,
+         (unsigned long)s->timestamp_ms, (unsigned)s->running, (unsigned)s->initializing);
+  printf("DIAG CAN rx=%lu last=0x%08lX hal=0x%08lX free=%lu\r\n",
+         (unsigned long)s->can_rx, (unsigned long)s->can_last_id,
+         (unsigned long)s->can_hal, (unsigned long)s->can_txfree);
+  if (s->can_status_result == HAL_OK && s->can_errors_result == HAL_OK)
+    printf("DIAG CAN off=%lu passive=%lu lec=%lu tec=%lu rec=%lu\r\n",
+           (unsigned long)s->can_status.BusOff, (unsigned long)s->can_status.ErrorPassive,
+           (unsigned long)s->can_status.LastErrorCode,
+           (unsigned long)s->can_errors.TxErrorCnt, (unsigned long)s->can_errors.RxErrorCnt);
+  else
+    printf("DIAG CAN read failed status=%u counters=%u\r\n",
+           (unsigned)s->can_status_result, (unsigned)s->can_errors_result);
+  printf("DIAG CG state=%s fault=%s managed=%u\r\n", motor_cg_state_name(s->cg_state),
+         motor_cg_fault_name(s->cg_fault), (unsigned)s->cg_managed);
+  if (s->initializing && s->rs_startup_valid)
+    printf("DIAG CG before_step=%s start_age=%lu state_age=%lu ms\r\n",
+           motor_cg_state_name(s->cg_before_step), (unsigned long)s->cg_start_age,
+           (unsigned long)s->cg_state_age);
+  printf("DIAG CG online=%u mode=%u flags=0x%02X age=%lu rx=%lu\r\n",
+         (unsigned)s->cg_feedback.online, (unsigned)s->cg_feedback.mode,
+         (unsigned)s->cg_feedback.fault_flags,
+         (unsigned long)(s->timestamp_ms - s->cg_feedback.last_received_ms),
+         (unsigned long)s->cg_feedback.rx_sequence);
+  printf("DIAG CG pos=%.5g vel=%.5g temp=%.5g\r\n",
+         (double)s->cg_feedback.position_rad, (double)s->cg_feedback.velocity_rad_s,
+         (double)s->cg_feedback.temperature_c);
+  printf("DIAG CG quiet=%u dwell=%lu ms mode_req=%u read=%u valid=%u pending=%u\r\n",
+         (unsigned)s->cg_quiet, (unsigned long)s->cg_quiet_age,
+         (unsigned)s->cg_requested_mode, (unsigned)s->cg_read_mode,
+         (unsigned)s->cg_mode_valid, (unsigned)s->cg_mode_pending);
+  printf("DIAG CG read_seq=%lu req_seq=%lu txq=%lu txfail=%lu\r\n",
+         (unsigned long)s->cg_mode_sequence, (unsigned long)s->cg_mode_request_sequence,
+         (unsigned long)s->cg_txq, (unsigned long)s->cg_txfail);
+  printf("DIAG CG type21_count=%lu raw=%02X%02X%02X%02X%02X%02X%02X%02X\r\n",
+         (unsigned long)s->cg_fault_sequence,
+         (unsigned)s->cg_fault_payload[0], (unsigned)s->cg_fault_payload[1],
+         (unsigned)s->cg_fault_payload[2], (unsigned)s->cg_fault_payload[3],
+         (unsigned)s->cg_fault_payload[4], (unsigned)s->cg_fault_payload[5],
+         (unsigned)s->cg_fault_payload[6], (unsigned)s->cg_fault_payload[7]);
+  printf("DIAG CG record=%s t=%lu fault=%s dt=%lu age=%lu\r\n",
+         s->cg_log_valid ? "FAULT" : "LATEST", (unsigned long)s->cg_log.timestamp_ms,
+         motor_cg_fault_name(s->cg_log.fault), (unsigned long)s->cg_log.control_dt_ms,
+         (unsigned long)s->cg_log.rx_age_ms);
+  printf("DIAG CG record q=%.5g qd=%.5g current=%.5g\r\n",
+         (double)s->cg_log.q, (double)s->cg_log.qd, (double)s->cg_log.i_cmd);
+  printf("DIAG RS startup_valid=%u age=%lu ms failed=%u timer_hal=%u\r\n",
+         (unsigned)s->rs_startup_valid, (unsigned long)s->rs_start_age,
+         (unsigned)s->rs_failed, (unsigned)s->timer_status);
+  for (uint32_t i = 0U; i < 3U; ++i)
+  {
+    const unsigned id = i == 0U ? RIGHT_RS03_ID : (i == 1U ? LEFT_RS03_ID : EL05_ID);
+    const RobstrideFeedback *f = &s->rs_feedback[i];
+    const RobstrideStartupAxis *a = &s->rs_axis[i];
+    printf("DIAG RS id=%u stage=%s wait_write=%u\r\n", id,
+           s->rs_startup_valid ? motor_rs_stage_name(a->stage) : "NOT_STARTED",
+           (unsigned)(s->rs_startup_valid && a->waiting_for_write));
+    printf("DIAG RS id=%u online=%u mode=%u fault=0x%02X age=%lu rx=%lu\r\n",
+           id, (unsigned)f->online, (unsigned)f->mode, (unsigned)f->fault_flags,
+           (unsigned long)(s->timestamp_ms - f->last_leceived_ms),
+           (unsigned long)f->received_count);
+    printf("DIAG RS id=%u pos=%.5g vel=%.5g temp=%.5g\r\n",
+           id, (double)f->position_rad, (double)f->velocity_rps, (double)f->temperature_c);
+    if (s->rs_startup_valid)
+      printf("DIAG RS id=%u baseline=%lu probe_age=%lu ms hold=%.5g\r\n",
+             id, (unsigned long)a->baseline_count,
+             (unsigned long)(s->timestamp_ms - a->last_probe_ms), (double)a->hold_position_rad);
+    if (label[0] == 'A') /* AFTER_STOP: explain each bit, using the saved sample. */
+      printf("DIAG STOP id=%u queued=%u confirmed=%u new_rx=%u\r\n", id,
+             (unsigned)((s->stop_queued >> i) & 1U), (unsigned)((s->stopped >> i) & 1U),
+             (unsigned)(f->received_count != s->stop_baseline[i]));
+  }
+  printf("DIAG targets CG=%.5g L=%.5g R=%.5g EL=%.5g\r\n",
+         (double)s->targets[0], (double)s->targets[1],
+         (double)s->targets[2], (double)s->targets[3]);
+  printf("DIAG %s END\r\n", label);
+}
+
 static void motor_init_print_can_status(void)
 {
   FDCAN_ProtocolStatusTypeDef status = {0};
@@ -289,8 +479,14 @@ static bool motor_stop_all(void)
 
 static void motor_init_failed(const char *reason)
 {
-  motor_stop_all();
+  /* Static storage avoids placing two diagnostic records on the MCU stack. */
+  static MotorDiagnosticSnapshot before_stop, after_stop;
+  motor_diagnostic_capture(&before_stop);
+  const bool stop_confirmed = motor_stop_all();
+  motor_diagnostic_capture(&after_stop);
   printf("Motor initialization/control failed: %s\r\n", reason);
+  motor_diagnostic_print("BEFORE_STOP", &before_stop);
+  if (!stop_confirmed) motor_diagnostic_print("AFTER_STOP", &after_stop);
   motor_init_print_can_status();
   motor_init_requested = false;
   printf("Waiting for a new motor initialization request\r\n");
@@ -342,6 +538,11 @@ static void motor_debug_print(void)
   const uint32_t right_age_ms = HAL_GetTick() - right.last_leceived_ms;
   const uint32_t right_queued = right_rs03_position_queued;
   const uint32_t right_failed = right_rs03_position_failed;
+  const RobstrideFeedback left = robstride_handler[LEFT_RS03_INDEX].feedback;
+  const float left_input_rad = target_angle[1];
+  const uint32_t left_age_ms = HAL_GetTick() - left.last_leceived_ms;
+  const uint32_t left_queued = left_rs03_position_queued;
+  const uint32_t left_failed = left_rs03_position_failed;
   __set_PRIMASK(interrupt_mask);
 
   printf("RS03 R id=3 pos=%.3f target=%.3f input=%.3f rad\r\n",
@@ -351,6 +552,13 @@ static void motor_debug_print(void)
          (unsigned int)right.mode, (unsigned int)right.fault_flags,
          (unsigned long)right.received_count, (unsigned long)right_age_ms,
          (unsigned long)right_queued, (unsigned long)right_failed);
+  printf("RS03 L id=4 pos=%.3f target=%.3f input=%.3f rad\r\n",
+         (double)left.position_rad, (double)(-left_input_rad),
+         (double)left_input_rad);
+  printf("RS03 L mode=%u fault=0x%02X rx=%lu age=%lu ms txq=%lu txfail=%lu\r\n",
+         (unsigned int)left.mode, (unsigned int)left.fault_flags,
+         (unsigned long)left.received_count, (unsigned long)left_age_ms,
+         (unsigned long)left_queued, (unsigned long)left_failed);
   printf("EL05 pos=%.3f target=%.3f rad\r\n",
          (double)position_rad, (double)target_rad);
 }
@@ -820,8 +1028,12 @@ static bool motor_start_control(void)
     [LEFT_RS03_INDEX] = ROBSTRIDE_LEFT_RS03_CURRENT_LIMIT_A,
     [EL05_INDEX] = ROBSTRIDE_EL05_CURRENT_LIMIT_A
   };
-  if (!robstride_startup_init(&robstride_startup, robstride_handler, 3U, current_limits_a) ||
-      !cybergear_begin_position_control(&cybergear_base, CYBERGEAR_COMPARE_OPERATION_MODE ?
+  motor_start_failure_reason = "RobStride startup setup";
+  if (!robstride_startup_init(&robstride_startup, robstride_handler, 3U, current_limits_a))
+    return false;
+  motor_startup_diagnostics_valid = true;
+  motor_start_failure_reason = "CyberGear begin position control";
+  if (!cybergear_begin_position_control(&cybergear_base, CYBERGEAR_COMPARE_OPERATION_MODE ?
           CYBERGEAR_RUN_MODE_OPERATION : CYBERGEAR_RUN_MODE_CURRENT))
     return false;
   while (1)
@@ -829,6 +1041,7 @@ static bool motor_start_control(void)
     robstride_startup_update(&robstride_startup);
     const uint32_t mask = __get_PRIMASK();
     __disable_irq();
+    motor_cg_before_step = cybergear_base.state;
     const bool cybergear_ok = cybergear_control_position_adrc(
         &cybergear_base, cybergear_base.requested_target_rad);
     const bool ready = cybergear_ok && cybergear_base.state == CG_STATE_RUNNING &&
@@ -839,11 +1052,25 @@ static bool motor_start_control(void)
       cybergear_base.first_cyclic = true;
       motors_running = true;
       timer_status = HAL_TIM_Base_Start_IT(&htim6);
+      motor_start_timer_status = timer_status;
       if (timer_status != HAL_OK) motors_running = false;
     }
     __set_PRIMASK(mask);
-    if (ready) return timer_status == HAL_OK;
-    if (!cybergear_ok || robstride_startup_failed(&robstride_startup)) return false;
+    if (ready)
+    {
+      motor_start_failure_reason = "TIM6 start";
+      return timer_status == HAL_OK;
+    }
+    if (!cybergear_ok)
+    {
+      motor_start_failure_reason = "CyberGear control during startup";
+      return false;
+    }
+    if (robstride_startup_failed(&robstride_startup))
+    {
+      motor_start_failure_reason = "RobStride startup timeout";
+      return false;
+    }
     cybergear_service(&cybergear_base);
     HAL_Delay(cybergear_base.config.controller.period_ms);
   }
@@ -860,6 +1087,9 @@ static void motor_initialize_requested(void)
   }
   motor_init_requested = false;
   motor_initializing = true;
+  motor_startup_diagnostics_valid = false;
+  motor_start_timer_status = HAL_OK;
+  motor_cg_before_step = CG_STATE_OFF;
   motor_init_feedback_received = false;
   motor_last_feedback_ms = HAL_GetTick();
   for (uint32_t index = 0U; index < 3U; ++index)
@@ -872,7 +1102,7 @@ static void motor_initialize_requested(void)
   else if (!cybergear_homing())
     motor_init_failed("CyberGear homing");
   else if (!motor_start_control())
-    motor_init_failed("motor startup confirmation or control timer");
+    motor_init_failed(motor_start_failure_reason);
   else
     printf("Motor initialization complete: %lu ms\r\n",
            (unsigned long)(HAL_GetTick() - started_ms));
@@ -1073,7 +1303,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
           ++right_rs03_position_failed;
         break;
       case 2U:
-        robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], -target_angle[1] - 1.0f);
+        if (robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], -target_angle[1] ))
+          ++left_rs03_position_queued;
+        else
+          ++left_rs03_position_failed;
         break;
       case 3U:
         robstride_set_position(&robstride_handler[EL05_INDEX], - target_angle[3] - 2.963f);
@@ -1094,7 +1327,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 
     // 1. 各モーターのフィードバックから現在角度(position_rad)を取得
     send_angles[2] = robstride_handler[RIGHT_RS03_INDEX].feedback.position_rad + 1.884f;
-    send_angles[1] = -(robstride_handler[LEFT_RS03_INDEX].feedback.position_rad + 1.0f);
+    send_angles[1] = -(robstride_handler[LEFT_RS03_INDEX].feedback.position_rad );
     send_angles[3] = -(robstride_handler[EL05_INDEX].feedback.position_rad + 2.963f);
     send_angles[0] = cybergear_base.feedback.position_rad;
 
@@ -1158,6 +1391,7 @@ int main(void)
     motor_init_failed("CAN setup");
     Error_Handler();
   }
+  //motor_init_requested = true;
   /* USER CODE END 2 */
 
   /* Infinite loop */

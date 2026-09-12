@@ -9,7 +9,7 @@ _Static_assert(sizeof(float) == sizeof(uint32_t) && FLT_RADIX == 2 &&
 
 /* Keep double literals for feedback and float arithmetic for commands, as before. */
 #define RIGHT_POSITION_OFFSET_RAD 1.884
-#define LEFT_POSITION_OFFSET_RAD 1.0
+#define LEFT_POSITION_OFFSET_RAD 0.0
 #define EL05_POSITION_OFFSET_RAD 2.963
 
 static uint32_t read_u32_be(const uint8_t *data)
