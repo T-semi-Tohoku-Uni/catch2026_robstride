@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 
+#define BOARD_RESET_CAN_ID 0x001U
 #define BOARD_TARGET_CAN_ID 0x200U
 #define BOARD_FEEDBACK_CAN_ID 0x210U
 #define BOARD_INIT_CAN_ID 0x500U

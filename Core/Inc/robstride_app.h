@@ -2,6 +2,7 @@
 #define __ROBSTRIDE__APP_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 #include "main.h"
 

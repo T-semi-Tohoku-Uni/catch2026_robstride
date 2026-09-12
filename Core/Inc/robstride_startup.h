@@ -1,6 +1,8 @@
 #ifndef ROBSTRIDE_STARTUP_H
 #define ROBSTRIDE_STARTUP_H
 
+#include <stdbool.h>
+#include <stdint.h>
 #include "robstride_app.h"
 
 #define ROBSTRIDE_STARTUP_MAX_MOTORS 3U

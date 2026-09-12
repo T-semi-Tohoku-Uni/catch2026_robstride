@@ -8,6 +8,11 @@ CyberGearを原点探索し、RobStride全3軸とCyberGearの起動確認後に�
 通常停止・モーター故障・起動失敗の後もCAN受付を継続します。
 全軸の停止確認後、新しい0→1開始指令で再初期化できます。
 
+基板間CAN（FDCAN1）で標準ID `0x001` のデータフレームを受信すると、
+データ長・内容に関係なく直ちにMCUをソフトウェアリセットします。
+拡張ID・リモートフレームはリセット対象外です。再起動後はCAN開始指令を待ちます。
+`0x001` はリセットしたいときに1回送信してください。受信するたびにリセットされます。
+
 `Error_Handler()` に入った場合はMCUをソフトウェアリセットし、周辺機能と
 アプリケーションを起動時から再初期化します。リセット後のモーター初期化・運転開始は
 CAN開始指令を待ちます。エラー原因が残っている場合はリセットを繰り返します。
@@ -61,7 +66,8 @@ IDE やデバッガの設定は各自の環境で作成してください。
 
 生成された GCC プリセットは、`toolchains/arm-none-eabi.cmake` を経由して
 標準Cヘッダー・`libc`・`libm`・`nano.specs` が揃ったコンパイラーを選択します。
-PATH 上のコンパイラーが不完全な場合は、STM32CubeCLT の標準インストール先を探します。
+PATH 上のコンパイラーが不完全な場合は、STM32CubeCLT の標準インストール先と
+Windows の `%LOCALAPPDATA%/stm32cube/bundles/gnu-tools-for-stm32/` を探します。
 任意の場所を使う場合は `-DARM_GNU_TOOLCHAIN_BIN_DIR=/path/to/toolchain/bin` を指定してください。
 `stdint.h: No such file or directory` などが出た既存のビルドは、キャッシュをリセットして再構成します
 （`--fresh` は CMake 3.24 以上。CLion では「キャッシュのリセットとプロジェクトの再読み込み」）。

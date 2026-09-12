@@ -955,6 +955,16 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
 
     switch (rxheader.Identifier)
     {
+      case BOARD_RESET_CAN_ID:
+        if (rxheader.IdType == FDCAN_STANDARD_ID &&
+            rxheader.RxFrameType == FDCAN_DATA_FRAME)
+        {
+          /* Reset the MCU regardless of payload or motor initialization state. */
+          __disable_irq();
+          NVIC_SystemReset();
+          return;
+        }
+        break;
       case MOTOR_INIT_CANID:
       {
         static bool has_previous_command = false;
@@ -1340,7 +1350,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = CYBERGEAR_UART_BAUD_RATE;
+  huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -1352,19 +1362,19 @@ static void MX_USART2_UART_Init(void)
   huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
   if (HAL_UART_Init(&huart2) != HAL_OK)
   {
-    return;
+    Error_Handler();
   }
   if (HAL_UARTEx_SetTxFifoThreshold(&huart2, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
-    return;
+    Error_Handler();
   }
   if (HAL_UARTEx_SetRxFifoThreshold(&huart2, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
   {
-    return;
+    Error_Handler();
   }
   if (HAL_UARTEx_DisableFifoMode(&huart2) != HAL_OK)
   {
-    return;
+    Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
   diagnostic_uart_ready = true;
