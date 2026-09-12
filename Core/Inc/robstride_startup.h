@@ -15,7 +15,7 @@
 #define ROBSTRIDE_STARTUP_ACCELERATION_RAD_S2 1.0f
 /* Per-motor current limits [A]. Applied on every startup and retry. */
 #define ROBSTRIDE_RIGHT_RS03_CURRENT_LIMIT_A 20.0f
-#define ROBSTRIDE_LEFT_RS03_CURRENT_LIMIT_A 20c.0f
+#define ROBSTRIDE_LEFT_RS03_CURRENT_LIMIT_A 20.0f
 #define ROBSTRIDE_EL05_CURRENT_LIMIT_A 10.0f
 
 typedef enum {
