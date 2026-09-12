@@ -103,6 +103,8 @@ static RobstrideStartup robstride_startup;
 static bool robstride_mode_pending[3] = {false};
 static uint32_t robstride_mode_since_ms[3] = {0U};
 static bool diagnostic_uart_ready = false;
+static volatile uint32_t right_rs03_position_queued = 0U;
+static volatile uint32_t right_rs03_position_failed = 0U;
 static uint32_t motor_stop_queued_mask = 0U;
 static uint32_t motor_stopped_mask = 0U;
 static uint32_t motor_stop_baseline[3] = {0U};
@@ -320,7 +322,7 @@ static void motor_return_update(void)
   }
 }
 
-static void el05_debug_print(void)
+static void motor_debug_print(void)
 {
   if (!motors_running || !diagnostic_uart_ready) return;
   static uint32_t last_print_ms = 0U;
@@ -335,8 +337,20 @@ static void el05_debug_print(void)
   __disable_irq();
   const float position_rad = robstride_handler[EL05_INDEX].feedback.position_rad;
   const float target_rad = -target_angle[3] - 2.963f;
+  const RobstrideFeedback right = robstride_handler[RIGHT_RS03_INDEX].feedback;
+  const float right_input_rad = target_angle[2];
+  const uint32_t right_age_ms = HAL_GetTick() - right.last_leceived_ms;
+  const uint32_t right_queued = right_rs03_position_queued;
+  const uint32_t right_failed = right_rs03_position_failed;
   __set_PRIMASK(interrupt_mask);
 
+  printf("RS03 R id=3 pos=%.3f target=%.3f input=%.3f rad\r\n",
+         (double)right.position_rad, (double)(right_input_rad - 1.884f),
+         (double)right_input_rad);
+  printf("RS03 R mode=%u fault=0x%02X rx=%lu age=%lu ms txq=%lu txfail=%lu\r\n",
+         (unsigned int)right.mode, (unsigned int)right.fault_flags,
+         (unsigned long)right.received_count, (unsigned long)right_age_ms,
+         (unsigned long)right_queued, (unsigned long)right_failed);
   printf("EL05 pos=%.3f target=%.3f rad\r\n",
          (double)position_rad, (double)target_rad);
 }
@@ -1053,7 +1067,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     switch (control_phase)
     {
       case 1U:
-        robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], target_angle[2] - 1.884f);
+        if (robstride_set_position(&robstride_handler[RIGHT_RS03_INDEX], target_angle[2] - 1.884f))
+          ++right_rs03_position_queued;
+        else
+          ++right_rs03_position_failed;
         break;
       case 2U:
         robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], -target_angle[1] - 1.0f);
@@ -1157,7 +1174,7 @@ int main(void)
     motor_return_update();
     cybergear_service(&cybergear_base);
     
-    el05_debug_print();
+    motor_debug_print();
     cybergear_debug_print();
     HAL_Delay(10);
   }
