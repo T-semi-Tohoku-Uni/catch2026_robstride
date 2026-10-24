@@ -43,7 +43,7 @@ static bool arm_native_send(uint8_t motor_id,FDCAN_TxHeaderTypeDef *header,uint8
     }
     return false;
   }
-  if(axis<0 || arm_native_busy(motor_id)) return false;
+  if(!arm_boot_complete || axis<0 || arm_native_busy(motor_id)) return false;
   uint32_t mask=__get_PRIMASK();__disable_irq();
   ArmNativeRequest *request=&arm_native_request[axis];
   uint8_t marker=(uint8_t)(0x80U+(unsigned)axis);
@@ -105,12 +105,12 @@ static int arm_target_rpc(uint8_t service,const uint8_t *data,uint8_t length,uin
   if(service!=CANRPC_PROJECT_ARM_TARGET_SERVICE || length!=12U) return 0;
   uint32_t result=0U;
   for(unsigned i=0;i<3U;++i) if(!isfinite(canrpc_get_float(data+4U*i))) result=1U;
-  if(arm_control_latched || rpc_state!=CANRPC_READY) result=3U;
+  if(!arm_boot_complete || arm_control_latched || rpc_state!=CANRPC_READY) result=3U;
   if(!result) return 0;
   canrpc_put_u32(reply,result);memcpy(reply+4,data,12);canrpc_put_u32(reply+16,0U);*reply_length=20U;return 1;
 }
 static int arm_control_start(uint8_t service,const uint8_t *data,uint8_t length,uint8_t slot,uint32_t token) {
-  if(service!=CANRPC_PROJECT_ARM_TARGET_SERVICE || length!=12U || arm_target_active || arm_control_latched || rpc_state!=CANRPC_READY) return 0;
+  if(service!=CANRPC_PROJECT_ARM_TARGET_SERVICE || length!=12U || !arm_boot_complete || arm_target_active || arm_control_latched || rpc_state!=CANRPC_READY) return 0;
   for(unsigned i=0;i<3U;++i) if(!isfinite(canrpc_get_float(data+4U*i))) return 0;
   arm_target_active=1U;arm_target_slot=slot;arm_target_token=token;arm_target_confirmed=0U;arm_target_started=HAL_GetTick();
   for(unsigned i=0;i<3U;++i) arm_target_values[i]=target_angle[i]=canrpc_get_float(data+4U*i);
@@ -125,6 +125,7 @@ static void arm_control_fail(uint8_t reason,uint8_t axis) {
   (void)arm_reset_prepare();
 }
 static void arm_control_poll(void) {
+  if (!arm_control_enabled) return;
   uint32_t mask=__get_PRIMASK();__disable_irq();
   arm_native_poll();
   if(rpc_reset_active) {

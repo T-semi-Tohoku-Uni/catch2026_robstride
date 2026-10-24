@@ -18,11 +18,14 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "canrpc_stm32.h"
-#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "canrpc_stm32.h"
+#include "canrpc_board.h"
+#include "canrpc_debug.h"
+#include "arm_board.h"
+#include <math.h>
 #include <stdio.h>
 
 #include "can_init.h"
@@ -95,6 +98,8 @@ void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static uint8_t arm_initialization_requested;
+
 /* Serialize the reset STOP handshake with cyclic native commands. */
 static void arm_reset_monitor(void)
 {
@@ -111,6 +116,7 @@ static void arm_reset_monitor(void)
 
 static int arm_reset_prepare(void)
 {
+  if (!arm_initialization_requested) return 1;
   uint32_t mask = __get_PRIMASK();
   __disable_irq();
   cybergear_base.preserve_adrc_on_tx_failure = true;
@@ -230,7 +236,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
     rpc_poll();
     arm_native_poll();
-    if (!motors_ready) return;
+    if (!arm_boot_complete || !motors_ready) return;
     if (rpc_state != CANRPC_READY) {
       arm_reset_monitor();
       static uint8_t reset_hold_phase;
@@ -319,20 +325,36 @@ int main(void)
   MX_TIM6_Init();
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
+  debug_uart = &huart2;
+  debug_stage = "board-preflight";
+  printf("boot node=arm uart=%lu\r\n", (unsigned long)huart2.Init.BaudRate);
+  if (!arm_board_config_valid(&hfdcan3, &htim6)) Error_Handler();
+  if (!canrpc_board_valid(&hfdcan1, 0)) Error_Handler();
+  debug_stage = "rpc-entropy";
   if (!rpc_init(&hfdcan1, CANRPC_NODE_ARM)) Error_Handler();
   rpc_prepare_reset = arm_reset_prepare;
+  printf("identity node=%u boot=", (unsigned)rpc_node);
+  for (unsigned i = 0; i < sizeof(rpc_boot); ++i) printf("%02x", (unsigned)rpc_boot[i]);
+  printf("\r\n");
+  debug_stage = "can-start";
   if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK) Error_Handler();
+  if (!canrpc_board_valid(&hfdcan1, 1)) Error_Handler();
   rpc_poll();
   if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK) Error_Handler();
+  debug_stage = "motor-can-start";
   if(motor_CAN_RxTxSettings_init(&motor_txheader)!=HAL_OK) Error_Handler();
   rpc_service_handler=arm_rpc;
   rpc_service_start=arm_control_start;
   arm_boot_initialize();
+  rpc_ready();
+  debug_stage = "running";
+  printf("boot stage=running rpc=%u\r\n", (unsigned)rpc_state);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  uint32_t cybergear_last_print_ms = HAL_GetTick();
+  uint32_t debug_last_ms = 0U;
+  uint8_t debug_last_step = 255U, debug_last_state = 255U;
   while (1)
   {
     
@@ -340,32 +362,67 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     arm_reset_monitor();
+    debug_drain();
+    static uint32_t debug_error_last_ms, debug_error_last_count;
+    uint32_t error_now = HAL_GetTick();
+    if ((uint32_t)(error_now - debug_error_last_ms) >= 1000U &&
+        debug_error_last_count != debug_can_tx_errors) {
+      debug_error_last_ms = error_now; debug_error_last_count = debug_can_tx_errors;
+      printf("can legacy_tx_error_count=%lu\r\n", (unsigned long)debug_error_last_count);
+    }
+    static uint32_t debug_can_last_ms, debug_last_psr = UINT32_MAX, debug_last_ecr = UINT32_MAX;
+    uint32_t can_now = HAL_GetTick();
+    if ((uint32_t)(can_now - debug_can_last_ms) >= 1000U) {
+      debug_can_last_ms = can_now;
+      /* PSR LEC/DLEC are read-to-clear diagnostics, not recovery actions. */
+      uint32_t psr = hfdcan1.Instance->PSR, ecr = hfdcan1.Instance->ECR;
+      if (psr != debug_last_psr || ecr != debug_last_ecr) {
+        debug_last_psr = psr; debug_last_ecr = ecr;
+        printf("can bus=rpc psr=%08lx ecr=%08lx busoff=%u tec=%lu rec=%lu\r\n",
+               (unsigned long)psr, (unsigned long)ecr, (unsigned)((psr >> 7U) & 1U),
+               (unsigned long)(ecr & 255U), (unsigned long)((ecr >> 8U) & 127U));
+      }
+    }
+    static uint32_t debug_native_last_ms, debug_native_psr = UINT32_MAX, debug_native_ecr = UINT32_MAX;
+    uint32_t native_now = HAL_GetTick();
+    if ((uint32_t)(native_now - debug_native_last_ms) >= 1000U) {
+      debug_native_last_ms = native_now;
+      /* PSR LEC/DLEC are read-to-clear diagnostics, not recovery actions. */
+      uint32_t psr = hfdcan3.Instance->PSR, ecr = hfdcan3.Instance->ECR;
+      if (psr != debug_native_psr || ecr != debug_native_ecr) {
+        debug_native_psr = psr; debug_native_ecr = ecr;
+        printf("can bus=motor psr=%08lx ecr=%08lx busoff=%u tec=%lu rec=%lu\r\n",
+               (unsigned long)psr, (unsigned long)ecr, (unsigned)((psr >> 7U) & 1U),
+               (unsigned long)(ecr & 255U), (unsigned long)((ecr >> 8U) & 127U));
+      }
+    }
     rpc_reset_poll();
     rpc_application_poll();
     arm_boot_poll();
     arm_control_poll();
-    const uint32_t print_now_ms = HAL_GetTick();
-    if ((uint32_t)(print_now_ms - cybergear_last_print_ms) >= 200U)
-    {
-      cybergear_last_print_ms = print_now_ms;
-      const uint32_t interrupt_mask = __get_PRIMASK();
+    const uint32_t now = HAL_GetTick();
+    if (debug_last_step != arm_boot_step || debug_last_state != rpc_state ||
+        (uint32_t)(now - debug_last_ms) >= 1000U) {
+      debug_last_step = arm_boot_step; debug_last_state = rpc_state; debug_last_ms = now;
+      uint8_t axes[36];
+      uint32_t mask = __get_PRIMASK();
       __disable_irq();
-      const float target_rad = target_angle[0];
-      const float current_rad = cybergear_base.feedback.position_rad;
-      const float reference_rad = cybergear_base.adrc.reference_rad;
-      const float iq_cmd_a = cybergear_base.adrc.current_a;
-      const bool feedback_online = cybergear_base.feedback.online;
-      const uint32_t feedback_age_ms = HAL_GetTick() - cybergear_base.feedback.last_received_ms;
-      const bool adrc_active = cybergear_base.adrc.active;
-      __set_PRIMASK(interrupt_mask);
-      printf("CyberGear target=%.3f rad, current=%.3f rad\r\n",
-             (double)target_rad, (double)current_rad);
-      printf("  ref=%.3f rad, iq_cmd=%.3f A, rx_age=%lu ms, online=%u, active=%u\r\n",
-             (double)reference_rad, (double)iq_cmd_a, (unsigned long)feedback_age_ms,
-             (unsigned int)feedback_online, (unsigned int)adrc_active);
+      if (arm_boot_failed) memcpy(axes, arm_fault_snapshot, sizeof(axes));
+      else for (unsigned i = 0; i < 3U; ++i) arm_axis_record(axes + i * 12U, i, now);
+      __set_PRIMASK(mask);
+      printf("arm rpc=%u stage=%u boot_complete=%u reason=%u axis=%u drop=%lu\r\n",
+             (unsigned)rpc_state, (unsigned)(arm_initialization_requested ? arm_boot_step : 31U), (unsigned)arm_boot_complete,
+             (unsigned)arm_failure_reason, (unsigned)arm_failure_axis, (unsigned long)debug_dropped);
+      for (unsigned i = 0; i < 3U; ++i) {
+        const uint8_t *a = axes + i * 12U;
+        printf("axis=%u id=%u mode=%u fault=%u flags=%u age_ms=%lu cmd=%u response=%u\r\n",
+               i, a[3], a[0], a[1], a[2], (unsigned long)canrpc_get_u32(a + 4), a[8], a[9]);
+      }
     }
+    /* Preserve the control cadence while servicing UART without waiting for TXE. */
+    uint32_t wait_started = HAL_GetTick();
+    while ((uint32_t)(HAL_GetTick() - wait_started) < 10U) debug_drain();
 
-    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
@@ -438,11 +495,11 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = CANRPC_PROJECT_NOMINAL_PRESCALER;
+  hfdcan1.Init.NominalPrescaler = 4;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
   hfdcan1.Init.NominalTimeSeg1 = 15;
   hfdcan1.Init.NominalTimeSeg2 = 4;
-  hfdcan1.Init.DataPrescaler = CANRPC_PROJECT_DATA_PRESCALER;
+  hfdcan1.Init.DataPrescaler = 2;
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 15;
   hfdcan1.Init.DataTimeSeg2 = 4;
@@ -695,8 +752,8 @@ void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len)
 
 int _write(int file,char *ptr,int len)
 {
-  HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, 10);
-  return len;
+  (void)file;
+  return debug_write(ptr, len);
 }
 /* USER CODE END 4 */
 
@@ -708,9 +765,12 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+  if (__get_IPSR() == 0U && __get_PRIMASK() == 0U)
+    printf("fatal stage=%s\r\n", debug_stage);
   __disable_irq();
   while (1)
   {
+    debug_drain();
   }
   /* USER CODE END Error_Handler_Debug */
 }

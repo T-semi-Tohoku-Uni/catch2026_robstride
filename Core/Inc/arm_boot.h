@@ -1,7 +1,9 @@
 #ifndef ARM_BOOT_H
 #define ARM_BOOT_H
 
-/* Application-only finite startup; no normal RPC starts homing again. */
+/* Explicit one-attempt startup; readiness queries never start homing. */
+static uint8_t arm_initialization_requested;
+static uint32_t arm_initialization_started_ms;
 static uint8_t arm_boot_step,arm_boot_waiting,arm_boot_failed,arm_boot_complete;
 static uint8_t arm_home_reached,arm_native_confirmed,arm_fault_stop_queued;
 static uint32_t arm_boot_started,arm_boot_delay_until,arm_home_started,arm_feedback_started;
@@ -82,16 +84,24 @@ static uint32_t arm_ready_flags(void) {
 static int arm_rpc(uint8_t service,const uint8_t *data,uint8_t length,uint8_t *reply,uint8_t *reply_length) {
   (void)data;
   if(service==CANRPC_PROJECT_ARM_TARGET_SERVICE) return arm_target_rpc(service,data,length,reply,reply_length);
-  if(service!=CANRPC_PROJECT_ARM_READY_SERVICE || length!=0U) return 0;
+  if ((service != CANRPC_PROJECT_ARM_READY_SERVICE &&
+       service != CANRPC_PROJECT_ARM_INITIALIZE_SERVICE) || length != 0U) return 0;
+  if (service == CANRPC_PROJECT_ARM_INITIALIZE_SERVICE && !arm_initialization_requested &&
+      !rpc_reset_active && rpc_state != CANRPC_RESET_PENDING) {
+    arm_initialization_requested = 1U;
+    arm_initialization_started_ms = HAL_GetTick();
+    arm_boot_started = arm_boot_delay_until = arm_initialization_started_ms;
+  }
   uint32_t flags=arm_boot_failed ? arm_failure_flags:arm_ready_flags();
-  memset(reply,0,48);
+  memset(reply,0,64);
   canrpc_put_u32(reply,arm_boot_failed || rpc_state==CANRPC_FAULT ? 2U : (flags==31U ? 0U:1U));
   canrpc_put_u32(reply+4,flags);
-  reply[8]=arm_boot_failed ? arm_failure_stage:(arm_boot_complete?29U:arm_boot_step);
-  reply[9]=arm_failure_reason;reply[10]=arm_failure_axis;reply[11]=1U;
+  reply[8]=!arm_initialization_requested ? 31U : (arm_boot_failed ? arm_failure_stage:(arm_boot_complete?29U:arm_boot_step));
+  reply[9]=arm_failure_reason;reply[10]=arm_failure_axis;reply[11]=2U;
   if(arm_boot_failed) memcpy(reply+12,arm_fault_snapshot,36);
   else for(unsigned i=0;i<3U;++i) arm_axis_record(reply+12+12U*i,i,HAL_GetTick());
-  *reply_length=48U;return 1;
+  memcpy(reply+48,rpc_boot,16U);
+  *reply_length=64U;return 1;
 }
 static void arm_boot_fault(uint8_t reason,uint8_t axis) {
   if(arm_boot_failed) return;
@@ -126,7 +136,6 @@ static void arm_boot_initialize(void) {
     robstride_handler[i].run_mode=POSITION_PP;
     robstride_handler[i].txheader=motor_txheader;
   }
-  arm_boot_started=HAL_GetTick();arm_boot_delay_until=arm_boot_started;
 }
 static int arm_boot_send_step(void) {
   uint8_t marker=(uint8_t)(0x20U+arm_boot_step);
@@ -175,6 +184,7 @@ static int arm_boot_send_step(void) {
   }
 }
 static void arm_boot_poll(void) {
+  if (!arm_initialization_requested || rpc_reset_active || rpc_state == CANRPC_RESET_PENDING) return;
   uint32_t now=HAL_GetTick();
   if(arm_boot_complete) return;
   if(arm_boot_failed) {
@@ -182,6 +192,9 @@ static void arm_boot_poll(void) {
       arm_fault_stop_queued=cybergear_request_stop_event(&cybergear_base,0x7eU);
     (void)arm_boot_tx_complete(0x7eU);
     return;
+  }
+  if ((uint32_t)(now - arm_initialization_started_ms) >= CANRPC_PROJECT_MOTOR_INITIALIZATION_TIMEOUT_MS) {
+    arm_boot_fault(9U,255U);return;
   }
   if(arm_boot_step==7U) {
     if((uint32_t)(now-arm_home_started)>=CANRPC_PROJECT_MOTOR_HOMING_TIMEOUT_MS) {arm_boot_fault(6U,0U);return;}

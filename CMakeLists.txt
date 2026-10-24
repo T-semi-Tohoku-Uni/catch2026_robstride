@@ -70,3 +70,11 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 )
 
 target_link_options(${CMAKE_PROJECT_NAME} PRIVATE -Wl,-u,_printf_float)
+
+# Verify regenerated settings on every build, using only Python standard library.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_custom_target(canrpc_configuration_check ALL
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_canrpc.py --repo ${CMAKE_CURRENT_SOURCE_DIR} --role arm
+    VERBATIM
+)
+add_dependencies(${CMAKE_PROJECT_NAME} canrpc_configuration_check)
