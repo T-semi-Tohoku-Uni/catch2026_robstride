@@ -77,6 +77,7 @@ static volatile bool motors_ready = false;
 static uint8_t current_seq;
 static volatile uint32_t axis_rx_count[3];
 static uint32_t published_rx_count[3];
+static volatile bool reset_stop_queued, reset_stop_confirmed;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -95,6 +96,45 @@ void int_to_u8(int32_t *req, uint8_t *des, uint32_t int_len);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* Serialize the reset STOP handshake with cyclic native commands. */
+static void arm_reset_monitor(void)
+{
+  uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  if (reset_stop_queued && !reset_stop_confirmed &&
+      cybergear_poll_stop_event(&cybergear_base, 0xa5U)) {
+    reset_stop_confirmed = true;
+    cybergear_base.adrc.active = false;
+    cybergear_base.adrc.initialized = false;
+  }
+  __set_PRIMASK(mask);
+}
+
+static int arm_reset_prepare(void)
+{
+  uint32_t mask = __get_PRIMASK();
+  __disable_irq();
+  cybergear_base.preserve_adrc_on_tx_failure = true;
+  if (!reset_stop_queued) {
+    /* Only cyclic NO_TX_EVENTS frames precede the first reset STOP. */
+    (void)cybergear_poll_stop_event(&cybergear_base, 0xa5U);
+    reset_stop_queued = cybergear_request_stop_event(&cybergear_base, 0xa5U);
+  }
+  arm_reset_monitor();
+  int prepared = reset_stop_confirmed;
+  __set_PRIMASK(mask);
+  return prepared;
+}
+
+static void arm_reset_hold(void)
+{
+  arm_reset_monitor();
+  if (!reset_stop_confirmed) {
+    cybergear_base.preserve_adrc_on_tx_failure = true;
+    cybergear_control_position_adrc(&cybergear_base, target_angle[0]);
+  }
+}
+
 bool cybergear_homing(void)
 {
   // 1. 速度制御モードに変更して有効化
@@ -292,6 +332,15 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
     rpc_poll();
     if (!motors_ready) return;
+    if (rpc_state != CANRPC_READY) {
+      arm_reset_monitor();
+      static uint8_t reset_hold_phase;
+      if (++reset_hold_phase >= 10U) {
+        reset_hold_phase = 0U;
+        arm_reset_hold();
+      }
+      return;
+    }
     static uint8_t control_phase = 0U;
 
     /* Stagger three commands across 1 ms ticks; each motor runs at 10 ms. */
@@ -372,6 +421,7 @@ int main(void)
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
   if (!rpc_init(&hfdcan1, CANRPC_NODE_ARM)) Error_Handler();
+  rpc_prepare_reset = arm_reset_prepare;
   if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK) Error_Handler();
   rpc_poll();
   if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK) Error_Handler();
@@ -411,6 +461,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    arm_reset_monitor();
+    rpc_reset_poll();
     const uint32_t print_now_ms = HAL_GetTick();
     if ((uint32_t)(print_now_ms - cybergear_last_print_ms) >= 200U)
     {

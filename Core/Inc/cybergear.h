@@ -76,6 +76,7 @@ typedef struct
 	FDCAN_TxHeaderTypeDef tx_header;
 	CyberGearFeedback feedback;
 	CyberGearAdrcState adrc;
+	bool preserve_adrc_on_tx_failure;
 } CyberGearMotor;
 
 bool cybergear_init(
@@ -88,6 +89,8 @@ bool cybergear_init(
 bool cybergear_enable(CyberGearMotor *motor);
 bool cybergear_stop(CyberGearMotor *motor);
 bool cybergear_clear_fault(CyberGearMotor *motor);
+bool cybergear_request_stop_event(CyberGearMotor *motor, uint8_t marker);
+bool cybergear_poll_stop_event(CyberGearMotor *motor, uint8_t marker);
 bool cybergear_set_zero(CyberGearMotor *motor);
 
 bool cybergear_control(

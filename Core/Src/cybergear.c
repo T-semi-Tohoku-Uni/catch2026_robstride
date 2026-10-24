@@ -518,7 +518,11 @@ bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
 		);
 		if (!cybergear_set_current(motor, current_a))
 		{
-			cybergear_stop(motor);
+			if (motor->preserve_adrc_on_tx_failure) {
+				/* The observer consumed this sample; retain the last transmitted current. */
+				state->last_update_ms = now_ms;
+				state->last_feedback_ms = feedback.last_received_ms;
+			} else cybergear_stop(motor);
 			return false;
 		}
 		state->current_a = current_a;
@@ -529,7 +533,7 @@ bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
 
 	if (!cybergear_set_current(motor, state->current_a))
 	{
-		cybergear_stop(motor);
+		if (!motor->preserve_adrc_on_tx_failure) cybergear_stop(motor);
 		return false;
 	}
 	return true;
@@ -584,4 +588,32 @@ bool cybergear_parse_feedback(
 	motor->feedback.online = true;
 
 	return true;
+}
+
+
+/* Reset-only STOP: retain the controller until this marked frame is transmitted. */
+bool cybergear_request_stop_event(CyberGearMotor *motor, uint8_t marker)
+{
+  if (motor == NULL || motor->hfdcan == NULL ||
+      HAL_FDCAN_GetTxFifoFreeLevel(motor->hfdcan) < 2U) return false;
+  FDCAN_TxHeaderTypeDef header = motor->tx_header;
+  header.Identifier = cybergear_make_can_id(CYBERGEAR_COMM_STOP, motor->master_id, motor->motor_id);
+  header.TxEventFifoControl = FDCAN_STORE_TX_EVENTS;
+  header.MessageMarker = marker;
+  uint8_t data[8] = {0};
+  return HAL_FDCAN_AddMessageToTxFifoQ(motor->hfdcan, &header, data) == HAL_OK;
+}
+
+bool cybergear_poll_stop_event(CyberGearMotor *motor, uint8_t marker)
+{
+  bool transmitted = false;
+  while ((motor->hfdcan->Instance->TXEFS & FDCAN_TXEFS_EFFL) != 0U) {
+    FDCAN_TxEventFifoTypeDef event;
+    if (HAL_FDCAN_GetTxEvent(motor->hfdcan, &event) != HAL_OK) break;
+    if (event.MessageMarker == marker && event.IdType == FDCAN_EXTENDED_ID &&
+        event.Identifier == cybergear_make_can_id(CYBERGEAR_COMM_STOP, motor->master_id, motor->motor_id) &&
+        (event.EventType == FDCAN_TX_EVENT || event.EventType == FDCAN_TX_IN_SPITE_OF_ABORT))
+      transmitted = true;
+  }
+  return transmitted;
 }
