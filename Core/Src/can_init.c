@@ -62,7 +62,7 @@ HAL_StatusTypeDef motor_CAN_RxTxSettings_init(FDCAN_TxHeaderTypeDef *Htxheader)
 
 void inter_board_CAN_filter_init(FDCAN_FilterTypeDef *Hfdcan_Filter_Settings)
 {
-  Hfdcan_Filter_Settings->IdType = FDCAN_STANDARD_ID;
+  Hfdcan_Filter_Settings->IdType = FDCAN_EXTENDED_ID;
   Hfdcan_Filter_Settings->FilterIndex = 0;
   Hfdcan_Filter_Settings->FilterType = FDCAN_FILTER_MASK;
   Hfdcan_Filter_Settings->FilterConfig = FDCAN_FILTER_TO_RXFIFO1;
@@ -72,7 +72,7 @@ void inter_board_CAN_filter_init(FDCAN_FilterTypeDef *Hfdcan_Filter_Settings)
 
 void inter_board_CAN_txheader_init(FDCAN_TxHeaderTypeDef *Htxheader)
 {
-	Htxheader->IdType = FDCAN_STANDARD_ID;
+	Htxheader->IdType = FDCAN_EXTENDED_ID;
 	Htxheader->TxFrameType = FDCAN_DATA_FRAME;
 	Htxheader->DataLength = FDCAN_DLC_BYTES_8;
 	Htxheader->FDFormat = FDCAN_FD_CAN;
@@ -95,7 +95,7 @@ HAL_StatusTypeDef inter_board_CAN_RxTxSettings_init(FDCAN_TxHeaderTypeDef *Htxhe
 		return HAL_ERROR;
 	}
 
-  if (HAL_OK != HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_ACCEPT_IN_RX_FIFO1, FDCAN_ACCEPT_IN_RX_FIFO1, FDCAN_FILTER_REMOTE, FDCAN_FILTER_REMOTE))
+  if (HAL_OK != HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE))
   {
 		printf("config global filter is error\r\n");
     return HAL_ERROR;

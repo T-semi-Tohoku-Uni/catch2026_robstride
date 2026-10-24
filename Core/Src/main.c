@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "canrpc_stm32.h"
+#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -45,7 +47,6 @@
 #define RIGHT_RS03_ID 3
 #define LEFT_RS03_ID 4
 
-#define EL05_ID 5
 
 #define CYBER_GEAR_ID 0x7f
 
@@ -53,7 +54,6 @@
 #define RIGHT_RS03_INDEX 0
 #define LEFT_RS03_INDEX 1
 
-#define EL05_INDEX 2
 
 #define CANID 0x200
 /* USER CODE END PM */
@@ -69,11 +69,14 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 FDCAN_TxHeaderTypeDef inter_board_txheader;
 FDCAN_TxHeaderTypeDef motor_txheader;
-RobstrideMotor robstride_handler[3] = {0};
+RobstrideMotor robstride_handler[2] = {0};
 CyberGearMotor cybergear_base;
 
-volatile float target_angle[4] = {0,0,2.0,0};
-static volatile bool el05_initializing = false;
+volatile float target_angle[3] = {0,0,2.0};
+static volatile bool motors_ready = false;
+static uint8_t current_seq;
+static volatile uint32_t axis_rx_count[3];
+static uint32_t published_rx_count[3];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -129,18 +132,14 @@ bool robstride_init(void)
 {
   robstride_handler[LEFT_RS03_INDEX].host_id  = HOST_ID;
   robstride_handler[RIGHT_RS03_INDEX].host_id = HOST_ID;
-  robstride_handler[EL05_INDEX].host_id       = HOST_ID;
   robstride_handler[LEFT_RS03_INDEX].motor_id  = LEFT_RS03_ID;
   robstride_handler[RIGHT_RS03_INDEX].motor_id = RIGHT_RS03_ID;
-  robstride_handler[EL05_INDEX].motor_id       = EL05_ID;
 
   robstride_handler[LEFT_RS03_INDEX].run_mode  = POSITION_PP;
   robstride_handler[RIGHT_RS03_INDEX].run_mode = POSITION_PP;
-  robstride_handler[EL05_INDEX].run_mode       = POSITION_PP;
 
   robstride_handler[LEFT_RS03_INDEX].txheader  = motor_txheader;
   robstride_handler[RIGHT_RS03_INDEX].txheader = motor_txheader;
-  robstride_handler[EL05_INDEX].txheader       = motor_txheader;
 
   for (uint32_t i = 0; i < (sizeof(robstride_handler) / sizeof(robstride_handler[0])); ++i)
   {
@@ -229,6 +228,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
       rxdata
     ))
     {
+      ++axis_rx_count[0];
       continue;
     }
 
@@ -238,6 +238,7 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
       if (robstride_handler[i].motor_id == motor_id)
       {
         robstride_parse_feedback(rxheader.Identifier, rxdata, &robstride_handler[i].feedback);
+        ++axis_rx_count[i == LEFT_RS03_INDEX ? 1U : 2U];
         break;
       }
     }
@@ -262,19 +263,15 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
       break;
     }
 
-    switch (rxheader.Identifier)
-    {
-      case CANID: 
-        float received_floats[4];
-        u8_to_float(rxdata, received_floats, 16);
-        for (int i = 0;i<4;i++){
-          target_angle[i] = received_floats[i];
-        }
-
-        break;
-      default:
-        // printf("unknown CAN ID received: 0x%03lX\r\n", RxHeader.Identifier); // printf should be commented out within Callback
-        break;
+    rpc_management(&rxheader, rxdata);
+    if (rpc_peer_ready() && rpc_state == CANRPC_READY && rpc_valid(&rxheader) && canrpc_class(rxheader.Identifier) == CANRPC_PUBLISH &&
+        canrpc_source(rxheader.Identifier) == CANRPC_NODE_ROS &&
+        canrpc_subject(rxheader.Identifier) == CANRPC_SUBJECT_TARGET &&
+        rxheader.DataLength == FDCAN_DLC_BYTES_12) {
+      float values[3];
+      for (unsigned i = 0; i < 3U; ++i) values[i] = canrpc_get_float(rxdata + i * 4U);
+      if (isfinite(values[0]) && isfinite(values[1]) && isfinite(values[2]))
+        for (unsigned i = 0; i < 3U; ++i) target_angle[i] = values[i];
     }
   }
 }
@@ -293,9 +290,11 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
+    rpc_poll();
+    if (!motors_ready) return;
     static uint8_t control_phase = 0U;
 
-    /* Stagger four commands across 1 ms ticks; each motor runs at 10 ms. */
+    /* Stagger three commands across 1 ms ticks; each motor runs at 10 ms. */
     switch (control_phase)
     {
       case 0U:
@@ -306,12 +305,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
         break;
       case 2U:
         robstride_set_position(&robstride_handler[LEFT_RS03_INDEX], -target_angle[1] - 1.0f);
-        break;
-      case 3U:
-        if (!el05_initializing)
-        {
-          robstride_set_position(&robstride_handler[EL05_INDEX], target_angle[3] + 2.23f);
-        }
         break;
       default:
         break;
@@ -324,24 +317,21 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     }
     control_phase = 0U;
 
-    float send_angles[4] = {0};
-    uint8_t txdata[16] = {0};
-
-    // 1. 各モーターのフィードバックから現在角度(position_rad)を取得
+    for (unsigned i = 0; i < 3U; ++i)
+      if (axis_rx_count[i] == published_rx_count[i]) return;
+    uint32_t counts[3];
+    for (unsigned i = 0; i < 3U; ++i) counts[i] = axis_rx_count[i];
+    float send_angles[3];
+    uint8_t txdata[12];
     send_angles[2] = robstride_handler[RIGHT_RS03_INDEX].feedback.position_rad + 1.884;
     send_angles[1] = -(robstride_handler[LEFT_RS03_INDEX].feedback.position_rad + 1.0);
-    send_angles[3] = robstride_handler[EL05_INDEX].feedback.position_rad - 2.23;
     send_angles[0] = cybergear_base.feedback.position_rad;
-
-    // 2. float (4つ) を uint8_t配列 (16バイト) に変換
-    float_to_u8(send_angles, txdata, 4);
-
-    // 3. 送信設定の変更 (16バイトのCAN FDフレームとして送信)
-    inter_board_txheader.Identifier = 0x210; // 必要に応じてIDを変更してください
-    inter_board_txheader.DataLength = FDCAN_DLC_BYTES_16; 
-
-    // 4. FDCAN1から送信
-    HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &inter_board_txheader, txdata);
+    for (unsigned i = 0; i < 3U; ++i) canrpc_put_float(txdata + 4U * i, send_angles[i]);
+    if (rpc_send(canrpc_publish_id(CANRPC_SUBJECT_CURRENT, CANRPC_NODE_ARM, current_seq),
+                 FDCAN_DLC_BYTES_12, txdata)) {
+      current_seq = (current_seq + 1U) & 31U;
+      for (unsigned i = 0; i < 3U; ++i) published_rx_count[i] = counts[i];
+    }
   }
 }
 /* USER CODE END 0 */
@@ -381,7 +371,10 @@ int main(void)
   MX_TIM6_Init();
   MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
-  inter_board_CAN_RxTxSettings_init(&inter_board_txheader);
+  if (!rpc_init(&hfdcan1, CANRPC_NODE_ARM)) Error_Handler();
+  if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK) Error_Handler();
+  rpc_poll();
+  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK) Error_Handler();
   motor_CAN_RxTxSettings_init(&motor_txheader);
   if (!cybergear_base_init())
   {
@@ -405,17 +398,12 @@ int main(void)
     printf("CyberGear ADRC initialization failed\r\n");
     Error_Handler();
   }
-  if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  motors_ready = true;
+  rpc_ready();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  const uint32_t el05_startup_ms = HAL_GetTick();
-  const uint32_t el05_initial_rx_count = robstride_handler[EL05_INDEX].feedback.received_count;
-  bool el05_retry_pending = true;
   uint32_t cybergear_last_print_ms = HAL_GetTick();
   while (1)
   {
@@ -423,32 +411,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* Retry once after fresh feedback, only during startup. */
-    if (el05_retry_pending)
-    {
-      const RobstrideFeedback feedback = robstride_handler[EL05_INDEX].feedback;
-      const uint32_t now_ms = HAL_GetTick();
-      if ((uint32_t)(now_ms - el05_startup_ms) >= 3000U)
-      {
-        el05_retry_pending = false;
-        printf("EL05 startup retry expired: no fresh feedback\r\n");
-      }
-      else if (feedback.online && feedback.received_count != el05_initial_rx_count &&
-               (uint32_t)(now_ms - feedback.last_leceived_ms) < 100U)
-      {
-        /* Never re-arm after a fault, a later stop, or a motor power cycle. */
-        el05_retry_pending = false;
-        if (feedback.mode == 0U && feedback.fault_flags == 0U)
-        {
-          el05_initializing = true;
-          const bool queued = robstride_start_position_pp_mode(
-              &robstride_handler[EL05_INDEX], 10, 1, 10);
-          el05_initializing = false;
-          printf("EL05 startup retry after feedback: queued=%u\r\n", (unsigned int)queued);
-        }
-      }
-    }
-    
     const uint32_t print_now_ms = HAL_GetTick();
     if ((uint32_t)(print_now_ms - cybergear_last_print_ms) >= 200U)
     {
@@ -551,8 +513,8 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 15;
   hfdcan1.Init.DataTimeSeg2 = 4;
-  hfdcan1.Init.StdFiltersNbr = 1;
-  hfdcan1.Init.ExtFiltersNbr = 0;
+  hfdcan1.Init.StdFiltersNbr = 0;
+  hfdcan1.Init.ExtFiltersNbr = 1;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
   {
