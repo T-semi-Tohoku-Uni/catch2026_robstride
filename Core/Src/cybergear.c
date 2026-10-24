@@ -102,6 +102,7 @@ static bool cybergear_send(
 	}
 
 	motor->tx_header.Identifier = can_id;
+	if(motor->request_send) return motor->request_send(motor->motor_id,&motor->tx_header,tx_data);
 
 	return HAL_FDCAN_AddMessageToTxFifoQ(
 		motor->hfdcan,
@@ -518,14 +519,14 @@ bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
 		);
 		if (!cybergear_set_current(motor, current_a))
 		{
-			if (motor->preserve_adrc_on_tx_failure) {
+			if (motor->preserve_adrc_on_tx_failure || (motor->request_busy && motor->request_busy(motor->motor_id))) {
 				/* The observer consumed this sample; retain the last transmitted current. */
 				state->last_update_ms = now_ms;
 				state->last_feedback_ms = feedback.last_received_ms;
 			} else cybergear_stop(motor);
 			return false;
 		}
-		state->current_a = current_a;
+		if(!motor->request_send) state->current_a = current_a;
 		state->last_update_ms = now_ms;
 		state->last_feedback_ms = feedback.last_received_ms;
 		return true;
@@ -533,7 +534,7 @@ bool cybergear_control_position_adrc(CyberGearMotor *motor, float position_rad)
 
 	if (!cybergear_set_current(motor, state->current_a))
 	{
-		if (!motor->preserve_adrc_on_tx_failure) cybergear_stop(motor);
+		if (!motor->preserve_adrc_on_tx_failure && !(motor->request_busy && motor->request_busy(motor->motor_id))) cybergear_stop(motor);
 		return false;
 	}
 	return true;
@@ -606,6 +607,8 @@ bool cybergear_request_stop_event(CyberGearMotor *motor, uint8_t marker)
 
 bool cybergear_poll_stop_event(CyberGearMotor *motor, uint8_t marker)
 {
+  if(motor->request_event) return motor->request_event(marker,
+    cybergear_make_can_id(CYBERGEAR_COMM_STOP,motor->master_id,motor->motor_id));
   bool transmitted = false;
   while ((motor->hfdcan->Instance->TXEFS & FDCAN_TXEFS_EFFL) != 0U) {
     FDCAN_TxEventFifoTypeDef event;

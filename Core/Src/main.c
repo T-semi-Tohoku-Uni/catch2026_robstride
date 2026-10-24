@@ -55,7 +55,6 @@
 #define LEFT_RS03_INDEX 1
 
 
-#define CANID 0x200
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -135,104 +134,11 @@ static void arm_reset_hold(void)
   }
 }
 
-bool cybergear_homing(void)
-{
-  // 1. 速度制御モードに変更して有効化
-  if (!cybergear_set_run_mode(&cybergear_base, CYBERGEAR_RUN_MODE_SPEED)) 
-  {
-    return false;
-  }
-  HAL_Delay(10);
-  if (!cybergear_enable(&cybergear_base)) 
-  {
-    return false;
-  }
-
-  GPIO_PinState initial_state = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-
-  cybergear_set_velocity(&cybergear_base, 1.0f);
-
-  while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == initial_state)
-  {
-    HAL_Delay(10); 
-  }
-
-  cybergear_stop(&cybergear_base);
-  HAL_Delay(100); 
-
-
-  cybergear_set_zero(&cybergear_base);
-  HAL_Delay(10);
-
-
-  return true;
-}
-
-bool robstride_init(void)
-{
-  robstride_handler[LEFT_RS03_INDEX].host_id  = HOST_ID;
-  robstride_handler[RIGHT_RS03_INDEX].host_id = HOST_ID;
-  robstride_handler[LEFT_RS03_INDEX].motor_id  = LEFT_RS03_ID;
-  robstride_handler[RIGHT_RS03_INDEX].motor_id = RIGHT_RS03_ID;
-
-  robstride_handler[LEFT_RS03_INDEX].run_mode  = POSITION_PP;
-  robstride_handler[RIGHT_RS03_INDEX].run_mode = POSITION_PP;
-
-  robstride_handler[LEFT_RS03_INDEX].txheader  = motor_txheader;
-  robstride_handler[RIGHT_RS03_INDEX].txheader = motor_txheader;
-
-  for (uint32_t i = 0; i < (sizeof(robstride_handler) / sizeof(robstride_handler[0])); ++i)
-  {
-    // robstride_stop(&robstride_handler[i]);
-    // HAL_Delay(10);
-
-    // // 2. 現在位置をゼロ点に設定する
-    // robstride_set_zero(&robstride_handler[i]);
-    // HAL_Delay(10);
-
-    if (!robstride_start_position_pp_mode(&robstride_handler[i], 10, 1, 10))
-    {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-bool cybergear_base_init(void)
-{
-  if (!cybergear_init(
-    &cybergear_base,
-    &hfdcan3,
-    CYBER_GEAR_ID,
-    HOST_ID
-  ))
-  {
-    return false;
-  }
-
-  if (!cybergear_stop(&cybergear_base))
-  {
-    return false;
-  }
-  HAL_Delay(10);
-
-
-  // if (!cybergear_set_zero(&cybergear_base))
-  //   return false;
-  // HAL_Delay(10);
-
-  if (!cybergear_set_run_mode(
-    &cybergear_base,
-    CYBERGEAR_RUN_MODE_OPERATION
-  ))
-  {
-    return false;
-  }
-  HAL_Delay(10);
-
-  return cybergear_enable(&cybergear_base);
-}
+static void arm_control_enable(void);
+static void arm_native_poll(void);
+static int arm_target_rpc(uint8_t,const uint8_t *,uint8_t,uint8_t *,uint8_t *);
+#include "arm_boot.h"
+#include "arm_control.h"
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
@@ -304,15 +210,7 @@ void HAL_FDCAN_RxFifo1Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo1ITs)
     }
 
     rpc_management(&rxheader, rxdata);
-    if (rpc_peer_ready() && rpc_state == CANRPC_READY && rpc_valid(&rxheader) && canrpc_class(rxheader.Identifier) == CANRPC_PUBLISH &&
-        canrpc_source(rxheader.Identifier) == CANRPC_NODE_ROS &&
-        canrpc_subject(rxheader.Identifier) == CANRPC_SUBJECT_TARGET &&
-        rxheader.DataLength == FDCAN_DLC_BYTES_12) {
-      float values[3];
-      for (unsigned i = 0; i < 3U; ++i) values[i] = canrpc_get_float(rxdata + i * 4U);
-      if (isfinite(values[0]) && isfinite(values[1]) && isfinite(values[2]))
-        for (unsigned i = 0; i < 3U; ++i) target_angle[i] = values[i];
-    }
+
   }
 }
 
@@ -331,6 +229,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
     rpc_poll();
+    arm_native_poll();
     if (!motors_ready) return;
     if (rpc_state != CANRPC_READY) {
       arm_reset_monitor();
@@ -376,7 +275,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
     send_angles[1] = -(robstride_handler[LEFT_RS03_INDEX].feedback.position_rad + 1.0);
     send_angles[0] = cybergear_base.feedback.position_rad;
     for (unsigned i = 0; i < 3U; ++i) canrpc_put_float(txdata + 4U * i, send_angles[i]);
-    if (rpc_send(canrpc_publish_id(CANRPC_SUBJECT_CURRENT, CANRPC_NODE_ARM, current_seq),
+    if (rpc_send(canrpc_publish_id(CANRPC_SUBJECT_CURRENT, CANRPC_NODE_ARM, current_seq, CANRPC_PROJECT_CURRENT_PRIORITY),
                  FDCAN_DLC_BYTES_12, txdata)) {
       current_seq = (current_seq + 1U) & 31U;
       for (unsigned i = 0; i < 3U; ++i) published_rx_count[i] = counts[i];
@@ -425,31 +324,10 @@ int main(void)
   if (inter_board_CAN_RxTxSettings_init(&inter_board_txheader) != HAL_OK) Error_Handler();
   rpc_poll();
   if (HAL_TIM_Base_Start_IT(&htim6) != HAL_OK) Error_Handler();
-  motor_CAN_RxTxSettings_init(&motor_txheader);
-  if (!cybergear_base_init())
-  {
-    Error_Handler();
-  }
-
-  if (!cybergear_homing())
-  {
-    printf("CyberGear Homing Failed\r\n");
-    Error_Handler();
-  }
-  /* Enable motors after the blocking homing routine, just before cyclic commands. */
-  if (!robstride_init())
-  {
-    Error_Handler();
-  }
-  printf("Motor initialization complete\r\n");
-  /* Start ADRC after blocking initialization to avoid its 100 ms startup timeout. */
-  if (!cybergear_start_position_adrc(&cybergear_base))
-  {
-    printf("CyberGear ADRC initialization failed\r\n");
-    Error_Handler();
-  }
-  motors_ready = true;
-  rpc_ready();
+  if(motor_CAN_RxTxSettings_init(&motor_txheader)!=HAL_OK) Error_Handler();
+  rpc_service_handler=arm_rpc;
+  rpc_service_start=arm_control_start;
+  arm_boot_initialize();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -463,6 +341,9 @@ int main(void)
     /* USER CODE BEGIN 3 */
     arm_reset_monitor();
     rpc_reset_poll();
+    rpc_application_poll();
+    arm_boot_poll();
+    arm_control_poll();
     const uint32_t print_now_ms = HAL_GetTick();
     if ((uint32_t)(print_now_ms - cybergear_last_print_ms) >= 200U)
     {
@@ -557,11 +438,11 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 4;
+  hfdcan1.Init.NominalPrescaler = CANRPC_PROJECT_NOMINAL_PRESCALER;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
   hfdcan1.Init.NominalTimeSeg1 = 15;
   hfdcan1.Init.NominalTimeSeg2 = 4;
-  hfdcan1.Init.DataPrescaler = 2;
+  hfdcan1.Init.DataPrescaler = CANRPC_PROJECT_DATA_PRESCALER;
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 15;
   hfdcan1.Init.DataTimeSeg2 = 4;

@@ -77,6 +77,9 @@ typedef struct
 	CyberGearFeedback feedback;
 	CyberGearAdrcState adrc;
 	bool preserve_adrc_on_tx_failure;
+	bool (*request_send)(uint8_t,FDCAN_TxHeaderTypeDef *,uint8_t *);
+	bool (*request_busy)(uint8_t);
+	bool (*request_event)(uint8_t,uint32_t);
 } CyberGearMotor;
 
 bool cybergear_init(

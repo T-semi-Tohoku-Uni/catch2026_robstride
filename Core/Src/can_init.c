@@ -1,4 +1,5 @@
 #include "can_init.h"
+#include "canrpc_project.h"
 #include <stdio.h>
 
 extern FDCAN_HandleTypeDef hfdcan1;
@@ -76,7 +77,7 @@ void inter_board_CAN_txheader_init(FDCAN_TxHeaderTypeDef *Htxheader)
 	Htxheader->TxFrameType = FDCAN_DATA_FRAME;
 	Htxheader->DataLength = FDCAN_DLC_BYTES_8;
 	Htxheader->FDFormat = FDCAN_FD_CAN;
-	Htxheader->BitRateSwitch = FDCAN_BRS_OFF;
+	Htxheader->BitRateSwitch = CANRPC_PROJECT_BRS ? FDCAN_BRS_ON : FDCAN_BRS_OFF;
 	Htxheader->ErrorStateIndicator = FDCAN_ESI_ACTIVE;
 	Htxheader->TxEventFifoControl = FDCAN_NO_TX_EVENTS;
 	Htxheader->MessageMarker = 0;

@@ -133,6 +133,10 @@ bool send_robstride(RobstrideMotor *motor, uint32_t id, uint8_t *txdata)
 	const uint32_t interrupt_mask = __get_PRIMASK();
 	__disable_irq();
 	motor->txheader.Identifier = id;
+	if(motor->request_send) {
+		bool queued=motor->request_send(motor->motor_id,&motor->txheader,txdata);
+		__set_PRIMASK(interrupt_mask);return queued;
+	}
 	const HAL_StatusTypeDef status = HAL_FDCAN_AddMessageToTxFifoQ(
 		&hfdcan3, &motor->txheader, txdata);
 	__set_PRIMASK(interrupt_mask);

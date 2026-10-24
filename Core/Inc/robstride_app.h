@@ -61,6 +61,7 @@ typedef struct
 	RobstrideRunMode run_mode;
 
 	FDCAN_TxHeaderTypeDef txheader;
+	bool (*request_send)(uint8_t,FDCAN_TxHeaderTypeDef *,uint8_t *);
 } RobstrideMotor;
 
 /* id 関連 */
