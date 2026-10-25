@@ -141,6 +141,8 @@ static void arm_reset_hold(void)
 }
 
 static void arm_control_enable(void);
+static uint8_t arm_native_failure(uint8_t *axis);
+static void arm_native_latch_fault(uint8_t reason,uint8_t axis);
 static void arm_native_poll(void);
 static int arm_target_rpc(uint8_t,const uint8_t *,uint8_t,uint8_t *,uint8_t *);
 #include "arm_boot.h"
@@ -237,7 +239,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
   if (htim == &htim6) {
     rpc_poll();
     arm_native_poll();
-    if (!arm_boot_complete || !motors_ready) return;
+    if ((!arm_boot_complete && !arm_motion_active) || !motors_ready) return;
     if (rpc_state != CANRPC_READY) {
       arm_reset_monitor();
       static uint8_t reset_hold_phase;

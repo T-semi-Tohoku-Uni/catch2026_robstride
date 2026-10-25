@@ -3,6 +3,11 @@
 
 /* Explicit one-attempt startup; readiness queries never start homing. */
 static uint8_t arm_initialization_requested;
+static const canrpc_arm_motion_config_t arm_motion_config=CANRPC_PROJECT_ARM_MOTION_CONFIG;
+static uint8_t arm_motion_active,arm_motion_settled,arm_motion_started;
+static canrpc_arm_settle_t arm_settle;
+static float arm_motion_previous[3],arm_motion_velocity[3];
+static uint32_t arm_motion_previous_ms[3],arm_motion_previous_counts[3];
 static uint32_t arm_initialization_started_ms;
 static uint8_t arm_boot_step,arm_boot_waiting,arm_boot_failed,arm_boot_complete;
 static uint8_t arm_home_reached,arm_native_confirmed,arm_fault_stop_queued;
@@ -77,9 +82,16 @@ static int arm_feedback_operating(void) {
     robstride_handler[0].feedback.mode==2U && robstride_handler[0].feedback.fault_flags==0U &&
     robstride_handler[1].feedback.mode==2U && robstride_handler[1].feedback.fault_flags==0U;
 }
+static void arm_joint_sample(float q[3]) {
+  q[0]=cybergear_base.feedback.position_rad;
+  q[1]=canrpc_arm_native_to_joint(&arm_motion_config,1,robstride_handler[LEFT_RS03_INDEX].feedback.position_rad);
+  q[2]=canrpc_arm_native_to_joint(&arm_motion_config,2,robstride_handler[RIGHT_RS03_INDEX].feedback.position_rad);
+}
 static uint32_t arm_ready_flags(void) {
+  float q[3];arm_joint_sample(q);
   return (arm_boot_complete ? 1U:0U) | (arm_feedback_fresh()?2U:0U) |
-    (arm_feedback_operating()?4U:0U) | (arm_native_confirmed?8U:0U) | (arm_home_reached?16U:0U);
+    (arm_feedback_operating()?4U:0U) | (arm_native_confirmed?8U:0U) | (arm_home_reached?16U:0U) |
+    ((arm_motion_settled || (arm_motion_active && canrpc_arm_at_goal(&arm_motion_config,q))) ? 32U:0U) | (arm_motion_settled?64U:0U);
 }
 static int arm_rpc(uint8_t service,const uint8_t *data,uint8_t length,uint8_t *reply,uint8_t *reply_length) {
   (void)data;
@@ -94,10 +106,10 @@ static int arm_rpc(uint8_t service,const uint8_t *data,uint8_t length,uint8_t *r
   }
   uint32_t flags=arm_boot_failed ? arm_failure_flags:arm_ready_flags();
   memset(reply,0,64);
-  canrpc_put_u32(reply,arm_boot_failed || rpc_state==CANRPC_FAULT ? 2U : (flags==31U ? 0U:1U));
+  canrpc_put_u32(reply,arm_boot_failed || rpc_state==CANRPC_FAULT ? 2U : (flags==127U ? 0U:1U));
   canrpc_put_u32(reply+4,flags);
   reply[8]=!arm_initialization_requested ? 31U : (arm_boot_failed ? arm_failure_stage:(arm_boot_complete?29U:arm_boot_step));
-  reply[9]=arm_failure_reason;reply[10]=arm_failure_axis;reply[11]=2U;
+  reply[9]=arm_failure_reason;reply[10]=arm_failure_axis;reply[11]=3U;
   if(arm_boot_failed) memcpy(reply+12,arm_fault_snapshot,36);
   else for(unsigned i=0;i<3U;++i) arm_axis_record(reply+12+12U*i,i,HAL_GetTick());
   memcpy(reply+48,rpc_boot,16U);
@@ -105,6 +117,7 @@ static int arm_rpc(uint8_t service,const uint8_t *data,uint8_t length,uint8_t *r
 }
 static void arm_boot_fault(uint8_t reason,uint8_t axis) {
   if(arm_boot_failed) return;
+  uint32_t interrupt_mask=__get_PRIMASK();__disable_irq();
   arm_failure_flags=arm_ready_flags();
   arm_failure_reason=reason;arm_failure_axis=axis;arm_failure_stage=arm_boot_complete ? 30U:arm_boot_step;
   if(axis<3U && reason<=5U) arm_axis_response[axis]=5U;
@@ -112,10 +125,12 @@ static void arm_boot_fault(uint8_t reason,uint8_t axis) {
     arm_axis_record(arm_fault_snapshot+12U*i,i,HAL_GetTick());
     arm_fault_snapshot[12U*i+2U]|=0x80U;
   }
-  arm_boot_failed=1U;motors_ready=false;
+  arm_boot_failed=1U;arm_motion_active=0U;motors_ready=false;
   rpc_state=CANRPC_FAULT;rpc_announce_due=1U;
+  if(arm_motion_started) arm_native_latch_fault(reason,axis);
   /* Snapshot precedes cleanup; a late STOP must not erase the failure evidence. */
   arm_boot_started=HAL_GetTick();arm_fault_stop_queued=0U;
+  __set_PRIMASK(interrupt_mask);
 }
 
 static int arm_boot_tx_complete(uint8_t marker) {
@@ -188,6 +203,8 @@ static void arm_boot_poll(void) {
   uint32_t now=HAL_GetTick();
   if(arm_boot_complete) return;
   if(arm_boot_failed) {
+    /* Motion uses the existing A5 cleanup; do not consume its TX events here. */
+    if(arm_motion_started) return;
     if(!arm_fault_stop_queued && (uint32_t)(now-arm_boot_started)<CANRPC_PROJECT_MOTOR_STEP_TIMEOUT_MS)
       arm_fault_stop_queued=cybergear_request_stop_event(&cybergear_base,0x7eU);
     (void)arm_boot_tx_complete(0x7eU);
@@ -196,6 +213,33 @@ static void arm_boot_poll(void) {
   if ((uint32_t)(now - arm_initialization_started_ms) >= CANRPC_PROJECT_MOTOR_INITIALIZATION_TIMEOUT_MS) {
     arm_boot_fault(9U,255U);return;
   }
+  if(arm_motion_active) {
+    uint32_t mask=__get_PRIMASK();__disable_irq();now=HAL_GetTick();
+    uint8_t failure_axis=255U,failure=arm_native_failure(&failure_axis);
+    if(failure) {__set_PRIMASK(mask);arm_boot_fault(failure,failure_axis);return;}
+    float q[3];uint32_t counts[3];arm_joint_sample(q);
+    for(unsigned i=0;i<3U;++i) counts[i]=axis_rx_count[i];
+    for(unsigned i=0;i<3U;++i) {
+      if(!counts[i] || arm_axis_age(i,now)>=CANRPC_PROJECT_MOTOR_FEEDBACK_MAX_AGE_MS) {
+        __set_PRIMASK(mask);arm_boot_fault(14U,(uint8_t)i);return;
+      }
+      if(arm_axis_fault(i)!=0U || arm_axis_mode(i)!=2U) {
+        uint8_t reason=arm_axis_fault(i)!=0U ? 4U:5U;
+        __set_PRIMASK(mask);arm_boot_fault(reason,(uint8_t)i);return;
+      }
+      if(counts[i]!=arm_motion_previous_counts[i]) {
+        uint32_t sampled=now-arm_axis_age(i,now),dt=sampled-arm_motion_previous_ms[i];
+        arm_motion_velocity[i]=dt ? (q[i]-arm_motion_previous[i])*1000.0f/(float)dt:INFINITY;
+        arm_motion_previous[i]=q[i];arm_motion_previous_ms[i]=sampled;arm_motion_previous_counts[i]=counts[i];
+      }
+    }
+    uint8_t axis=255U;int reason=canrpc_arm_joint_safe(&arm_motion_config,q,&axis);
+    if(reason) {__set_PRIMASK(mask);arm_boot_fault((uint8_t)reason,axis);return;}
+    int settled=canrpc_arm_settled(&arm_motion_config,&arm_settle,q,arm_motion_velocity,counts,now);
+    arm_boot_step=arm_settle.active ? 33U:32U;
+    if(settled) {arm_motion_settled=1U;arm_motion_active=0U;arm_boot_complete=1U;rpc_ready();}
+    __set_PRIMASK(mask);return;
+  }
   if(arm_boot_step==7U) {
     if((uint32_t)(now-arm_home_started)>=CANRPC_PROJECT_MOTOR_HOMING_TIMEOUT_MS) {arm_boot_fault(6U,0U);return;}
     if(HAL_GPIO_ReadPin(GPIOA,GPIO_PIN_0)==arm_home_initial) return;
@@ -203,12 +247,24 @@ static void arm_boot_poll(void) {
   }
   if(arm_boot_step==28U) {
     if((uint32_t)(now-arm_feedback_started)>=CANRPC_PROJECT_MOTOR_FEEDBACK_TIMEOUT_MS) {arm_boot_fault(7U,255U);return;}
-    if(!arm_feedback_fresh() || !arm_feedback_operating()) return;
-    for(unsigned i=0;i<3U;++i) if(axis_rx_count[i]==arm_feedback_baseline[i]) return;
+    uint32_t mask=__get_PRIMASK();__disable_irq();now=HAL_GetTick();
+    if(!arm_feedback_fresh() || !arm_feedback_operating()) {__set_PRIMASK(mask);return;}
+    for(unsigned i=0;i<3U;++i) if(axis_rx_count[i]==arm_feedback_baseline[i]) {__set_PRIMASK(mask);return;}
+    float q[3];arm_joint_sample(q);uint8_t axis=255U;
+    int reason=canrpc_arm_joint_safe(&arm_motion_config,q,&axis);
+    if(reason) {__set_PRIMASK(mask);arm_boot_fault((uint8_t)reason,axis);return;}
+    /* Keep the existing initial pose and native control settings. */
+    target_angle[0]=0.0f;target_angle[1]=0.0f;target_angle[2]=2.0f;
+    memset(&arm_settle,0,sizeof(arm_settle));
+    for(unsigned i=0;i<3U;++i) {
+      arm_motion_previous[i]=q[i];arm_motion_velocity[i]=INFINITY;
+      arm_motion_previous_counts[i]=axis_rx_count[i];
+      arm_motion_previous_ms[i]=now-arm_axis_age(i,now);
+    }
     cybergear_base.tx_header.TxEventFifoControl=FDCAN_NO_TX_EVENTS;
     for(unsigned i=0;i<2U;++i) robstride_handler[i].txheader.TxEventFifoControl=FDCAN_NO_TX_EVENTS;
     cybergear_base.adrc.last_update_ms=now;cybergear_base.adrc.active=true;
-    arm_boot_complete=1U;arm_control_enable();motors_ready=true;rpc_ready();return;
+    arm_motion_started=arm_motion_active=1U;arm_control_enable();motors_ready=true;arm_boot_step=32U;__set_PRIMASK(mask);return;
   }
   if((int32_t)(now-arm_boot_delay_until)<0) return;
   uint8_t axis=arm_step_axis();

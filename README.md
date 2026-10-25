@@ -123,10 +123,16 @@ profile同期→CubeMX再生成→profile側`--check`と単独checker→cross bu
 
 ## 駆動電源の後投入と明示初期化
 
-MCU起動直後は通信READY・アプリWAITING（診断stage31）です。CANRPC `arm_initialize`（service2、request0B/response64B）を受けるまでnative motor CANへ送信しません。`arm_ready`（service0）は読取専用で初期化を始めません。両応答は従来48B診断＋自MCU Boot ID16Bの64B/version2です。通信READYはモーター動作可能を意味しません。
+MCU起動直後は通信READY・アプリWAITING（診断stage31）です。CANRPC `arm_initialize`（service2、request0B/response64B）を受けるまでnative motor CANへ送信しません。`arm_ready`（service0）は読取専用で初期化を始めません。両応答は従来48B診断＋自MCU Boot ID16Bの64B/version3です。通信READYはモーター動作可能を意味しません。
 
 `arm_initialize`は開始フラグを記録して直ちに現在の診断を返します。受理ACK/応答は初期化完了ではなく、呼出側はarm_readyの完了・全軸fresh等を確認します。原点復帰を含むFSMはmainで有限実行し、全体期限はprofileのinitialization_timeout_ms（既定20000ms）、超過reason9です。1MCU bootで1回だけ開始し、RUNNING・READY・FAULTで再要求しても再実行しません。失敗後は手動MCU resetが必要です。
 
-初期化未開始のSYSTEM_RESET準備はmotor STOPを送らず成功します。開始後のSYSTEM_RESET・原点復帰・mode切替・故障時STOPとその既存確認は維持します。初期化未完了中のtarget要求・周期native制御は拒否します。実機の電源・原点・停止性能は未検証です。
+初期化未開始のSYSTEM_RESET準備はmotor STOPを送らず成功します。開始後のSYSTEM_RESET・原点復帰・mode切替・故障時STOPとその既存確認は維持します。初期化未完了中は通常target要求を拒否し、初期移動の周期native制御をFSMが専有します。実機の電源・原点・停止性能は未検証です。
 
 通常手順はMCU電源投入→駆動電源投入→UI INITIALIZEです。駆動電源がないままINITIALIZEすると有限時間でFAULTとなり、1bootの試行を消費します。MCUだけを手動reset/電源断し駆動電源を維持した場合、モーターが以前の指令を保持する可能性があります。新bootのWAITINGは過去の運転を検出できず、指示前STOPを送らないため、この操作の機械停止を保証しません。運転開始後のCANRPC SYSTEM_RESETは従来のSTOP実TX確認を維持しますが、外部resetや電源断とは区別してください。
+
+## INITの初期移動と最終完了
+
+設定・原点復帰後は既存の初期角{0,0,2}radをMCUが専有して制御し、通常arm_targetを受け付けません。全3軸の新しい実測が既存nav由来の角許容{0.05,0.01,0.01}rad内、位置差分由来の速度0.05rad/s以下で200ms継続した場合だけboot_completeを立て、arm_ready version3/flags127で最終完了を返します。設定ACKは移動完了ではありません。全体期限は既存20秒のままです。
+
+初期角・native offset・PP速度10/加速度1/電流10・既存故障q0STOP方式は維持し、未設定機械rangeや新faultpolicyの許可gateは追加しません。INIT前nativeTX0を維持し、移動中のstale/fault/非有限角/期限超過は成功にしません。新しい全TorqueOFFは行いません。角度UART追加は保持します。

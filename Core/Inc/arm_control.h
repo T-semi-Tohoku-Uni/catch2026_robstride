@@ -43,7 +43,7 @@ static bool arm_native_send(uint8_t motor_id,FDCAN_TxHeaderTypeDef *header,uint8
     }
     return false;
   }
-  if(!arm_boot_complete || axis<0 || arm_native_busy(motor_id)) return false;
+  if((!arm_boot_complete && !arm_motion_active) || axis<0 || arm_native_busy(motor_id)) return false;
   uint32_t mask=__get_PRIMASK();__disable_irq();
   ArmNativeRequest *request=&arm_native_request[axis];
   uint8_t marker=(uint8_t)(0x80U+(unsigned)axis);
@@ -93,6 +93,13 @@ static void arm_native_poll(void) {
       if(arm_target_active && request->target_token==arm_target_token) arm_target_confirmed|=(uint8_t)(1U<<i);
     }
   }
+}
+static void arm_native_latch_fault(uint8_t reason,uint8_t axis) {
+  if(!arm_control_latched && !arm_control_failure) {arm_control_failure=reason;arm_control_failure_axis=axis;}
+}
+static uint8_t arm_native_failure(uint8_t *axis) {
+  if(axis) *axis=arm_control_failure_axis;
+  return arm_control_failure;
 }
 static void arm_control_enable(void) {
   uint32_t mask=__get_PRIMASK();__disable_irq();
