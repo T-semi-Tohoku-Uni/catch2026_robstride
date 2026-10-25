@@ -145,6 +145,7 @@ static void arm_native_poll(void);
 static int arm_target_rpc(uint8_t,const uint8_t *,uint8_t,uint8_t *,uint8_t *);
 #include "arm_boot.h"
 #include "arm_control.h"
+#include "arm_debug.h"
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
@@ -419,6 +420,7 @@ int main(void)
                i, a[3], a[0], a[1], a[2], (unsigned long)canrpc_get_u32(a + 4), a[8], a[9]);
       }
     }
+    arm_debug_angles_poll();
     /* Preserve the control cadence while servicing UART without waiting for TXE. */
     uint32_t wait_started = HAL_GetTick();
     while ((uint32_t)(HAL_GetTick() - wait_started) < 10U) debug_drain();

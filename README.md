@@ -23,6 +23,31 @@ stage 0..28はboot FSM段階、29はREADY、30は通常制御のACK待ち、31�
 
 有限待ちの既定値は命令200ms、homing10秒、最終feedback1秒、fresh age100ms、命令間10ms、home停止後100msです。実機適合は未確認です。原点精度や機械停止を確認する値ではありません。
 
+## UARTでの角度確認
+
+USART2（115200 baud、8N1）の既存printfに、`angles_live`と各軸の`angle`行を追加しています。
+200ms間隔に加え、boot完了／FAULTへの変化時にもmainから出力します。割込中に整形せず、
+既存の非同期送信バッファを使います。診断のためのCAN要求は送りません。
+
+```text
+angles_live t_ms=12500 stage=28 boot_complete=1 rpc=1 target_token=0
+angle axis=1 id=4 mode=2 valid=1 fresh=1 age_ms=8 motor_rad=-1.0000 joint_rad=-0.0000 target_rad=+0.0000
+```
+
+上記は書式例です。axis 0=CyberGear、1=左RS03、2=右RS03です。
+`motor_rad`は最後に受信・復号したモーター角度、`joint_rad`はROSへ返す座標へ変換した角度、
+`target_rad`はMCUの現在の関節目標変数（すべてrad）です。変換はq0=motor、
+q1=−(motor+1.0)、q2=motor+1.884で、正規化や多回転補正を追加しません。
+`target_rad`は未初期化でも表示され、送信済み・モーター側の保持目標・到達を保証しません。
+`target_token=0`はまだ通常の関節目標RPCを受理していないことを示します。
+
+未受信は`valid=0`、角度`nan`、`age_ms=4294967295`です。受信後も古い値は残り、
+`fresh=0`と増加する`age_ms`で区別します。`t_ms`はMCU起動からの取得時刻です。
+`angles_live`は故障後も最新の受信バッファを表示するため、`flags`のbit7が立った
+既存`axis`行（故障時に固定した診断・age）とは取得時点が異なります。
+出力はbest effortで、混雑／reset時には欠落し得ます。`drop`も確認してください。
+UARTログは実機の原点・許容範囲・物理的な停止を保証しません。
+
 ## 位置要求とnative制御
 
 `arm_target`応答はu32 result（0 APPLIED/1 INVALID/2 NOT_READY/3 FAULT）、要求目標のecho12byte、u32 confirmed-axis maskです。0かつmask7だけが全3軸適用確認です。位置到達を意味しません。
@@ -56,7 +81,7 @@ native受信はtype2 statusの6bit faultを対象とし、type21 FAULT_REPORTの
 
 `catch2026_robstride.ioc`を開き、`Keep User Code when re-generating`を有効のまま
 CMake向けに生成してください。アームの状態・callback・boot/control/reset処理は
-`main.c`のUSER CODE領域、固有実装は`arm_boot.h`・`arm_control.h`・`arm_board.h`と
+`main.c`のUSER CODE領域、固有実装は`arm_boot.h`・`arm_control.h`・`arm_board.h`・`arm_debug.h`と
 `can_init.c`・`cybergear.c`・`robstride_app.c`にあります。生成対象外ファイルと
 最上位CMakeのユーザーsource登録・`_printf_float`リンク指定を保持してください。
 `cmake/stm32cubemx/CMakeLists.txt`へ独自sourceを追加しません。
